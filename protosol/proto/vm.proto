@@ -1,0 +1,183 @@
+syntax = "proto3";
+package org.solana.sealevel.v1;
+import "invoke.proto";
+import "context.proto";
+import "metadata.proto";
+
+// Describes an input data region. Agave's memory mapping sets up a series of
+// memory mapped regions, which combine to make the input data region.
+message InputDataRegion {
+  // Offset from the start of the input data segment (0x400000000)
+  uint64 offset = 1;
+  // Content of the memory region
+  bytes content = 2;
+  // If the memory region is writable or not
+  bool is_writable = 3;
+}
+
+// TODO: investigate make this an overlay not a context, and let each target set up the 
+// vm context from the instruction context.
+
+// Information sufficient to allow the fuzzer to generate a fd_vm_t context for 
+// execution inside the VM (excluding the instruction context).
+//
+// TODO: this currently only includes fields necessary for executing syscalls,
+// executing sBPF code will require the rest of the fields in fd_vm_t to be set.
+message VmContext {
+    // Maximum heap size in bytes
+    uint64 heap_max = 1;
+
+    // Program read-only data
+    bytes rodata = 2;
+    // Offset of the text section from the start of the program rodata segment
+    // (0x100000000)
+    uint64 rodata_text_section_offset = 3;
+    // Length of the text section in the program rodata region, in bytes.
+    uint64 rodata_text_section_length = 4;
+    
+    // The input data regions
+    repeated InputDataRegion input_data_regions = 5;
+
+    // Registers
+    uint64 r0 = 6;
+    uint64 r1 = 7;
+    uint64 r2 = 8;
+    uint64 r3 = 9;
+    uint64 r4 = 10;
+    uint64 r5 = 11;
+    uint64 r6 = 12;
+    uint64 r7 = 13;
+    uint64 r8 = 14;
+    uint64 r9 = 15;
+    uint64 r10 = 16;
+    uint64 r11 = 17;
+
+    bool check_align = 18;
+    bool check_size = 19;
+    
+    // for vm execution
+    uint64  entry_pc = 20;
+    /* Bitset of valid call destinations (in terms of pc).
+       This model is used by the Firedancer VM for CALL_IMMs */
+    bytes   call_whitelist = 21;
+    bool tracing_enabled = 22;
+
+    ReturnData return_data = 23;
+
+    // SBPF version
+    uint32 sbpf_version = 24;
+}
+
+// TODO: use structured types for syscall implementation to improve fuzz coverage
+// We should seperate out the engine protos from the target protos to make implementation
+// of the targets easier.
+
+// TODO: for CPI syscalls, consider generating effects in protobufs vs full cpi
+// execution
+
+// A single invocation of a syscall
+message SyscallInvocation {
+    // The sBPF function name of the syscall
+    bytes function_name = 1;
+    // The initial portion of the heap, for example to store syscall inputs
+    bytes heap_prefix = 2;
+    // The initial portion of the stack, for example to store syscall inputs
+    bytes stack_prefix = 3;
+}
+
+// Execution context for a VM Syscall execution.
+message SyscallContext {
+    VmContext vm_ctx = 1;
+    // InflightInstruction - contain temporary fields that live for the duration of an instructions execution, and is needed if we have overhanging context from a previous instruction
+    InstrContext instr_ctx = 2;
+    SyscallInvocation syscall_invocation = 3;
+
+    // For CPI, we want to control the effects of a program invocation
+    InstrEffects exec_effects = 4;
+}
+
+// We are only concerned with these error kinds as the syscall/VM fuzzers don't
+// hit higher level error kinds (e.g., transaction errors)
+enum ErrKind {
+    UNSPECIFIED     = 0;
+    EBPF            = 1;
+    SYSCALL         = 2;
+    INSTRUCTION     = 3;
+}
+
+// The effects of executing a SyscallContext.
+message SyscallEffects {
+    // EBPF error code, if the invocation was unsuccessful
+    int64 error = 1;
+    // Error Kind (should be used along with error code)
+    ErrKind error_kind = 12;
+    
+    // Registers
+    uint64 r0 = 2; // Result of a successful execution
+
+    // CU's remaining
+    uint64 cu_avail = 3;
+
+    // Memory regions
+    bytes heap = 4;
+    bytes stack = 5;
+
+    bytes inputdata = 6; // deprecated, use input_data_regions
+    repeated InputDataRegion input_data_regions = 11;
+
+    // Current number of stack frames pushed
+    uint64 frame_count = 7;
+
+    // Syscall log
+    bytes log = 8;
+
+    bytes rodata = 9;
+
+    // VM state
+    uint64 pc = 10;
+
+    // Output registers (to test interpreter)
+    uint64 r1 = 107;
+    uint64 r2 = 108;
+    uint64 r3 = 109;
+    uint64 r4 = 110;
+    uint64 r5 = 111;
+    uint64 r6 = 112;
+    uint64 r7 = 113;
+    uint64 r8 = 114;
+    uint64 r9 = 115;
+    uint64 r10 = 116;
+}
+
+// A syscall processing test fixture.
+message SyscallFixture {
+    FixtureMetadata metadata = 1;
+    SyscallContext input = 2;
+    SyscallEffects output = 3;
+}
+
+// Everything needed to setup a fd_vm_t
+message FullVmContext {
+    VmContext vm_ctx = 1;
+    // InstrContext instr_ctx = 2;
+    FeatureSet features = 3;
+}
+
+// Effects of fd_vm_validate
+message ValidateVmEffects {
+    int32 result = 1;
+    // if result is 0 (success), protobuf will be empty!!
+    bool success = 2;
+}
+
+// Fixture for fd_vm_validate fuzz harness
+message ValidateVmFixture {
+    FixtureMetadata metadata = 1;
+    FullVmContext 	input 	= 2;
+    ValidateVmEffects 	output	= 3;
+}
+
+message ReturnData {
+    bytes program_id = 1;
+    bytes data = 2;
+}

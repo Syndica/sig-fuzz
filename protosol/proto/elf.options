@@ -1,0 +1,7 @@
+elf.proto package:"fd_exec_test"
+elf.proto include:"../../../nanopb/pb_firedancer.h"
+
+fd_exec_test.ELFBinary.data type:FT_POINTER
+
+fd_exec_test.ELFLoaderEffects.rodata type:FT_POINTER
+fd_exec_test.ELFLoaderEffects.calldests type:FT_POINTER
