@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const sig = b.dependency("sig", .{
         .target = target,
         .optimize = optimize,
+        .blockstore = .hashmap,
     });
     const pb = b.dependency("pb", .{
         .target = target,
@@ -16,7 +17,10 @@ pub fn build(b: *std.Build) void {
 
     var protoc_step = protobuf.RunProtocStep.create(b, pb.builder, target, .{
         .destination_directory = b.path("src/proto"),
-        .source_files = &.{"protosol/proto/elf.proto"},
+        .source_files = &.{
+            "protosol/proto/elf.proto",
+            "protosol/proto/vm.proto",
+        },
         .include_directories = &.{"protosol/proto"},
     });
 
