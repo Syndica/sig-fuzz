@@ -116,16 +116,23 @@ export fn sol_compat_vm_interp_v1(
     in_size: u64,
 ) i32 {
     errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // defer _ = gpa.deinit();
+    // const allocator = gpa.allocator();
     const allocator = std.heap.c_allocator;
 
     const in_slice = in_ptr[0..in_size];
     const syscall_context = try SyscallContext.decode(in_slice, allocator);
+    defer syscall_context.deinit();
 
-    const result = executeVmTest(syscall_context) catch {
+    const result = executeVmTest(syscall_context, allocator) catch {
         return 0;
     };
+    defer result.deinit();
 
     const elf_effect_bytes = try result.encode(allocator);
+    defer allocator.free(elf_effect_bytes);
+
     const out_slice = out_ptr[0..out_size.*];
     if (elf_effect_bytes.len > out_slice.len) {
         return 0;
@@ -135,8 +142,10 @@ export fn sol_compat_vm_interp_v1(
     return 1;
 }
 
-fn executeVmTest(syscall_context: SyscallContext) !pb.SyscallEffects {
-    const allocator = std.heap.c_allocator;
+fn executeVmTest(
+    syscall_context: SyscallContext,
+    allocator: std.mem.Allocator,
+) !pb.SyscallEffects {
     const config: Config = .{ .minimum_version = .v1 };
     const vm_ctx = syscall_context.vm_ctx.?;
     const rodata_slice = vm_ctx.rodata.getSlice();
@@ -173,6 +182,8 @@ fn executeVmTest(syscall_context: SyscallContext) !pb.SyscallEffects {
     std.mem.copyForwards(u8, stack, syscall_inv.stack_prefix.getSlice());
 
     var regions: std.ArrayListUnmanaged(Region) = .{};
+    defer regions.deinit(allocator);
+
     try regions.appendSlice(allocator, &.{
         Region.init(.constant, vm_ctx.rodata.getSlice(), memory.PROGRAM_START),
         Region.init(.mutable, stack, memory.STACK_START),
@@ -189,20 +200,27 @@ fn executeVmTest(syscall_context: SyscallContext) !pb.SyscallEffects {
                 Region.init(.mutable, mutable, memory.INPUT_START + input_data_offset),
             );
         } else {
+            const duped = try allocator.dupe(u8, input_region.content.getSlice());
             try regions.append(
                 allocator,
-                Region.init(
-                    .constant,
-                    input_region.content.getSlice(),
-                    memory.INPUT_START + input_data_offset,
-                ),
+                Region.init(.constant, duped, memory.INPUT_START + input_data_offset),
             );
         }
         input_data_offset += input_region.content.getSlice().len;
     }
+    defer {
+        for (regions.items) |region| {
+            if (region.vm_addr_start >= memory.INPUT_START) {
+                // the function does not return errors for `.constant` accesses
+                const slice = region.getSlice(.constant) catch unreachable;
+                allocator.free(slice);
+            }
+        }
+    }
 
     const map = try memory.MemoryMap.init(regions.items, version);
     var vm = try Vm.init(allocator, &executable, map, &loader, stack.len);
+    defer vm.deinit();
 
     vm.registers.set(.r0, vm_ctx.r0);
     vm.registers.set(.r1, vm_ctx.r1);
@@ -239,8 +257,8 @@ fn executeVmTest(syscall_context: SyscallContext) !pb.SyscallEffects {
         .r9 = out_registers[9],
         .r10 = out_registers[10],
         .frame_count = vm.depth,
-        .heap = try protobuf.ManagedString.copy(heap, allocator),
-        .stack = try protobuf.ManagedString.copy(stack, allocator),
+        .heap = protobuf.ManagedString.move(heap, allocator),
+        .stack = protobuf.ManagedString.move(stack, allocator),
         .rodata = try protobuf.ManagedString.copy(rodata_slice, allocator),
         .input_data_regions = std.ArrayList(pb.InputDataRegion).init(allocator),
         .pc = vm.registers.get(.r11),
