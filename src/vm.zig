@@ -3,112 +3,24 @@ const sig = @import("sig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const protobuf = @import("protobuf");
 
-const ELFLoaderCtx = pb.ELFLoaderCtx;
-const ElfLoaderEffects = pb.ELFLoaderEffects;
 const SyscallContext = pb.SyscallContext;
 
-const syscalls = sig.svm.syscalls;
-const Elf = sig.svm.Elf;
-const Executable = sig.svm.Executable;
-const Config = sig.svm.Config;
-const memory = sig.svm.memory;
-const BuiltinProgram = sig.svm.BuiltinProgram;
+const svm = sig.svm;
+const syscalls = svm.syscalls;
+const Elf = svm.Elf;
+const Executable = svm.Executable;
+const Config = svm.Config;
+const memory = svm.memory;
+const BuiltinProgram = svm.BuiltinProgram;
 const Region = memory.Region;
-const Vm = sig.svm.Vm;
-const Registry = sig.svm.Registry;
-const Instruction = sig.svm.sbpf.Instruction;
+const Vm = svm.Vm;
+const Registry = svm.Registry;
+const Instruction = svm.sbpf.Instruction;
 
 const HEAP_MAX = 256 * 1024;
 const STACK_SIZE = 4_096 * 64;
 
-export fn sol_compat_init(log_level: i32) void {
-    _ = log_level;
-}
-export fn sol_compat_fini() void {}
-
-export fn sol_compat_elf_loader_v1(
-    out_ptr: [*]u8,
-    out_size: *u64,
-    in_ptr: [*]const u8,
-    in_size: u64,
-) i32 {
-    errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
-    const allocator = std.heap.c_allocator;
-
-    const in_slice: []const u8 = in_ptr[0..in_size];
-    const ctx = ELFLoaderCtx.decode(in_slice, allocator) catch return 0;
-    const ctx_elf = ctx.elf orelse return 0;
-    const elf_bytes = ctx_elf.data.getSlice();
-
-    var elf_effects: ElfLoaderEffects = .{
-        .calldests = std.ArrayList(u64).init(allocator),
-    };
-    var loader: BuiltinProgram = .{};
-
-    inline for (.{
-        .{ "sol_log_", syscalls.log },
-        .{ "sol_log_64_", syscalls.log64 },
-        .{ "sol_log_pubkey", syscalls.logPubkey },
-        .{ "sol_log_compute_units_", syscalls.logComputeUnits },
-        .{ "sol_memset_", syscalls.memset },
-        .{ "sol_memcpy_", syscalls.memcpy },
-        .{ "abort", syscalls.abort },
-    }) |entry| {
-        const name, const function = entry;
-        _ = try loader.functions.registerHashed(
-            allocator,
-            name,
-            function,
-        );
-    }
-
-    const config: Config = .{
-        .minimum_version = .v1,
-        .optimize_rodata = false,
-    };
-    const duped_elf_bytes = try allocator.dupe(u8, elf_bytes[0..ctx.elf_sz]);
-
-    const output_file = try std.fs.cwd().createFile("out.so", .{});
-    try output_file.writeAll(duped_elf_bytes);
-    output_file.close();
-
-    var elf = Elf.parse(allocator, duped_elf_bytes, &loader, config) catch {
-        return 0;
-    };
-    const executable = Executable.fromElf(allocator, &elf) catch {
-        return 0;
-    };
-
-    const ro_data = switch (executable.ro_section) {
-        .owned => |o| o.data,
-        .borrowed => |a| executable.bytes[a.start..a.end],
-    };
-
-    const text_bytes_index = elf.data.getShdrIndexByName(elf.headers, ".text").?;
-    const text_bytes = try elf.headers.shdrSlice(text_bytes_index);
-    elf_effects.rodata = try protobuf.ManagedString.copy(ro_data, allocator);
-    elf_effects.rodata_sz = ro_data.len;
-    elf_effects.entry_pc = executable.entry_pc;
-    elf_effects.text_off = executable.text_vaddr - memory.PROGRAM_START;
-    elf_effects.text_cnt = text_bytes.len / 8;
-
-    var iter = executable.function_registry.map.iterator();
-    while (iter.next()) |entry| {
-        const fn_addr = entry.value_ptr.value;
-        try elf_effects.calldests.append(fn_addr);
-    }
-    std.sort.heap(u64, elf_effects.calldests.items, {}, std.sort.asc(u64));
-
-    const elf_effect_bytes = try elf_effects.encode(allocator);
-    const out_slice = out_ptr[0..out_size.*];
-    if (elf_effect_bytes.len > out_slice.len) {
-        return 0;
-    }
-    @memcpy(out_slice[0..elf_effect_bytes.len], elf_effect_bytes);
-    out_size.* = elf_effect_bytes.len;
-    return 1;
-}
-
+// NOTE: This totally doesn't work, just for fun and testing!
 export fn sol_compat_vm_interp_v1(
     out_ptr: [*]u8,
     out_size: *u64,
@@ -149,7 +61,7 @@ fn executeVmTest(
     const config: Config = .{ .minimum_version = .v1 };
     const vm_ctx = syscall_context.vm_ctx.?;
     const rodata_slice = vm_ctx.rodata.getSlice();
-    const version: sig.svm.SBPFVersion = @enumFromInt(vm_ctx.sbpf_version);
+    const version: svm.sbpf.Version = @enumFromInt(vm_ctx.sbpf_version);
     if (version != .v1) return error.SupportThisVersion;
 
     const function_registry: Registry(u64) = .{};
@@ -161,13 +73,13 @@ fn executeVmTest(
         .bytes = rodata_slice,
         .version = version,
         .ro_section = .{ .borrowed = .{
-            .offset = memory.PROGRAM_START,
+            .offset = memory.RODATA_START,
             .start = 0,
             .end = rodata_slice.len,
         } },
         .entry_pc = vm_ctx.entry_pc,
         .config = config,
-        .text_vaddr = memory.PROGRAM_START,
+        .text_vaddr = memory.RODATA_START,
         .function_registry = function_registry,
         .from_elf = false,
     };
@@ -185,7 +97,7 @@ fn executeVmTest(
     defer regions.deinit(allocator);
 
     try regions.appendSlice(allocator, &.{
-        Region.init(.constant, vm_ctx.rodata.getSlice(), memory.PROGRAM_START),
+        Region.init(.constant, vm_ctx.rodata.getSlice(), memory.RODATA_START),
         Region.init(.mutable, stack, memory.STACK_START),
         Region.init(.mutable, heap, memory.HEAP_START),
     });

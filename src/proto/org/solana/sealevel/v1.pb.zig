@@ -435,3 +435,86 @@ pub const ReturnData = struct {
 
     pub usingnamespace protobuf.MessageMixins(@This());
 };
+
+pub const ShredBinary = struct {
+    data: ManagedString = .Empty,
+
+    pub const _desc_table = .{
+        .data = fd(1, .Bytes),
+    };
+
+    pub usingnamespace protobuf.MessageMixins(@This());
+};
+
+pub const DataHeader = struct {
+    parent_off: u32 = 0,
+    flags: u32 = 0,
+    size: u32 = 0,
+
+    pub const _desc_table = .{
+        .parent_off = fd(1, .{ .Varint = .Simple }),
+        .flags = fd(2, .{ .Varint = .Simple }),
+        .size = fd(3, .{ .Varint = .Simple }),
+    };
+
+    pub usingnamespace protobuf.MessageMixins(@This());
+};
+
+pub const CodeHeader = struct {
+    data_cnt: u32 = 0,
+    code_cnt: u32 = 0,
+    idx: u32 = 0,
+
+    pub const _desc_table = .{
+        .data_cnt = fd(1, .{ .Varint = .Simple }),
+        .code_cnt = fd(2, .{ .Varint = .Simple }),
+        .idx = fd(3, .{ .Varint = .Simple }),
+    };
+
+    pub usingnamespace protobuf.MessageMixins(@This());
+};
+
+pub const ParsedShred = struct {
+    signature: ManagedString = .Empty,
+    variant: u32 = 0,
+    slot: u64 = 0,
+    idx: u32 = 0,
+    version: u32 = 0,
+    fec_set_idx: u32 = 0,
+    shred_type: ?shred_type_union,
+
+    pub const _shred_type_case = enum {
+        data,
+        code,
+    };
+    pub const shred_type_union = union(_shred_type_case) {
+        data: DataHeader,
+        code: CodeHeader,
+        pub const _union_desc = .{
+            .data = fd(7, .{ .SubMessage = {} }),
+            .code = fd(8, .{ .SubMessage = {} }),
+        };
+    };
+
+    pub const _desc_table = .{
+        .signature = fd(1, .String),
+        .variant = fd(2, .{ .Varint = .Simple }),
+        .slot = fd(3, .{ .Varint = .Simple }),
+        .idx = fd(4, .{ .Varint = .Simple }),
+        .version = fd(5, .{ .Varint = .Simple }),
+        .fec_set_idx = fd(6, .{ .Varint = .Simple }),
+        .shred_type = fd(null, .{ .OneOf = shred_type_union }),
+    };
+
+    pub usingnamespace protobuf.MessageMixins(@This());
+};
+
+pub const AcceptsShred = struct {
+    valid: bool = false,
+
+    pub const _desc_table = .{
+        .valid = fd(1, .{ .Varint = .Simple }),
+    };
+
+    pub usingnamespace protobuf.MessageMixins(@This());
+};

@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     const sig = b.dependency("sig", .{
         .target = target,
         .optimize = optimize,
+        .@"enable-tsan" = false,
         .blockstore = .hashmap,
     });
     const pb = b.dependency("pb", .{
@@ -20,15 +21,16 @@ pub fn build(b: *std.Build) void {
         .source_files = &.{
             "protosol/proto/elf.proto",
             "protosol/proto/vm.proto",
+            "protosol/proto/shred.proto",
         },
         .include_directories = &.{"protosol/proto"},
     });
 
     const lib = b.addSharedLibrary(.{
-        .name = "svm_fuzz",
+        .name = "elf",
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("src/fuzz.zig"),
+        .root_source_file = b.path("src/lib.zig"),
     });
     lib.root_module.addImport("sig", sig.module("sig"));
     lib.root_module.addImport("protobuf", pb.module("protobuf"));
