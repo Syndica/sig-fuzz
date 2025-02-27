@@ -17,11 +17,6 @@ const Vm = svm.Vm;
 const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
 
-export fn sol_compat_init(log_level: i32) void {
-    _ = log_level;
-}
-export fn sol_compat_fini() void {}
-
 export fn sol_compat_elf_loader_v1(
     out_ptr: [*]u8,
     out_size: *u64,
@@ -30,16 +25,31 @@ export fn sol_compat_elf_loader_v1(
 ) i32 {
     errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
     const allocator = std.heap.c_allocator;
+    // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 100 }){};
+    // defer _ = gpa.deinit();
+    // const allocator = gpa.allocator();
 
     const in_slice: []const u8 = in_ptr[0..in_size];
     const ctx = ELFLoaderCtx.decode(in_slice, allocator) catch return 0;
-    const ctx_elf = ctx.elf orelse return 0;
+    defer ctx.deinit();
+
+    const elf_effects = executeElfTest(ctx, allocator) catch return 0;
+    defer elf_effects.deinit();
+
+    return try encode(elf_effects, allocator, out_ptr, out_size);
+}
+
+fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEffects {
+    const ctx_elf = ctx.elf orelse return error.Unknown;
     const elf_bytes = ctx_elf.data.getSlice();
+    if (elf_bytes.len != ctx.elf_sz) return error.Unknown;
 
     var elf_effects: ElfLoaderEffects = .{
         .calldests = std.ArrayList(u64).init(allocator),
     };
+
     var loader: BuiltinProgram = .{};
+    defer loader.deinit(allocator);
 
     inline for (.{
         .{ "sol_log_", syscalls.log },
@@ -63,16 +73,23 @@ export fn sol_compat_elf_loader_v1(
         .minimum_version = .v0,
         .optimize_rodata = false,
     };
-    const duped_elf_bytes = try allocator.dupe(u8, elf_bytes[0..ctx.elf_sz]);
 
-    const output_file = try std.fs.cwd().createFile("out.so", .{});
-    try output_file.writeAll(duped_elf_bytes);
-    output_file.close();
+    const duped_elf_bytes = try allocator.alloc(u8, ctx.elf_sz);
+    @memset(duped_elf_bytes, 0);
+    @memcpy(duped_elf_bytes.ptr, elf_bytes[0..@min(elf_bytes.len, ctx.elf_sz)]);
+    defer allocator.free(duped_elf_bytes);
+
+    // const output_file = try std.fs.cwd().createFile("out.so", .{});
+    // try output_file.writeAll(duped_elf_bytes);
+    // output_file.close();
 
     var elf = Elf.parse(allocator, duped_elf_bytes, &loader, config) catch {
-        return try encode(elf_effects, allocator, out_ptr, out_size);
+        return elf_effects;
     };
-    const executable = Executable.fromElf(elf) catch return 0;
+    errdefer elf.deinit(allocator);
+
+    var executable = Executable.fromElf(elf);
+    defer executable.deinit(allocator);
 
     const ro_data = switch (executable.ro_section) {
         .owned => |o| o.data,
@@ -99,7 +116,7 @@ export fn sol_compat_elf_loader_v1(
     }
     std.sort.heap(u64, elf_effects.calldests.items, {}, std.sort.asc(u64));
 
-    return try encode(elf_effects, allocator, out_ptr, out_size);
+    return elf_effects;
 }
 
 fn encode(
@@ -109,6 +126,7 @@ fn encode(
     out_size: *u64,
 ) !i32 {
     const effect_bytes = try effect.encode(allocator);
+    defer allocator.free(effect_bytes);
     const out_slice = out_ptr[0..out_size.*];
     if (effect_bytes.len > out_slice.len) {
         return 0;
