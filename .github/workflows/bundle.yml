@@ -1,12 +1,10 @@
 name: Bundle for FuzzCorp
 on:
-  workflow_dispatch:
   repository_dispatch:
     types: [sig, solfuzz_main, solfuzz_agave]
   push:
     branches:
     - master
-    - Rexicon226/solfuzz-ci
 
 jobs:
   build:
@@ -43,7 +41,7 @@ jobs:
           repository: firedancer-io/solfuzz
           run-id: ${{ github.event.client_payload.run_id}}
           name: solfuzz-bins
-          path: ./bundle
+          path: ./temp
     
       - name: Bundle
         run: ./scripts/bundle.sh
