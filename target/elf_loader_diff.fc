@@ -15,7 +15,7 @@
         "path": "lib/libsolfuzz_agave.so",
         "feature": "asan",
         "source": ""
-      },
+      }
     ]
   },
   "lineage": "sol_elf_loader_diff",
