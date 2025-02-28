@@ -14,20 +14,23 @@ export fn sol_compat_shred_parse_v1(
     in_size: u64,
 ) i32 {
     errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // var gpa = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 100 }){};
+    // defer _ = gpa.deinit();
+    // const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
     const in_slice = in_ptr[0..in_size];
-    const shred_binary = try ShredBinary.decode(in_slice, allocator);
+    const shred_binary = ShredBinary.decode(in_slice, allocator) catch return 0;
     defer shred_binary.deinit();
 
-    var result: AcceptsShred = .{ .valid = std.meta.isError(
-        Shred.fromPayload(allocator, shred_binary.data.getSlice()),
-    ) };
+    const shred = Shred.fromPayload(allocator, shred_binary.data.getSlice()) catch null;
+    defer if (shred) |s| s.deinit();
+
+    var result: AcceptsShred = .{ .valid = shred != null };
+    defer result.deinit();
 
     const result_bytes = try result.encode(allocator);
-    defer result.deinit();
+    defer allocator.free(result_bytes);
 
     const out_slice = out_ptr[0..out_size.*];
     if (result_bytes.len > out_slice.len) {
