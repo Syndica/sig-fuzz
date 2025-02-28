@@ -26,8 +26,6 @@ jobs:
 
       - name: Build sig-fuzz
         run: zig build -Dcpu=haswell --summary all
-          
-      # TODO: download solfuzz_agave and solfuzz's "fuzz_sol" binaries here
 
       - name: Download solfuzz_agave Artifacts
         env: 
@@ -47,4 +45,8 @@ jobs:
         run: ./scripts/bundle.sh
 
       - run: ls -R bundle
+
+      - run: |
+          mkdir result
+          unzip bundle/fuzz.zip -d result/
  
