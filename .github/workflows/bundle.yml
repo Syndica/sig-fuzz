@@ -25,7 +25,7 @@ jobs:
           version: 0.13.0
 
       - name: Build sig-fuzz
-        run: zig build -Dcpu=haswell --summary all
+        run: zig build -Dcpu=haswell -Doptimize=ReleaseSafe --summary all
 
       - name: Download Artifacts
         env: 
