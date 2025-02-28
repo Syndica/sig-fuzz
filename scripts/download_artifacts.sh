@@ -2,16 +2,17 @@
 # This script grabs the requisite solfuzz .so's from GitHub Artifacts and collects head_branch and head_sha.
 set -e
 
+repo_solfuzz="firedancer-io/solfuzz"
 repo_agave="firedancer-io/solfuzz-agave"
 
-repos=("$repo_agave")
+repos=("$repo_agave" "$repo_solfuzz")
 artifacts_agave=("libsolfuzz-agave.so")
-# artifacts_solfuzz=("sol" "libfd_exec_sol_compat_cov")
+artifacts_solfuzz=("solfuzz-bins")
 
 # Associate repos with their corresponding artifacts lists
 declare -A repo_artifacts
 repo_artifacts["$repo_agave"]="${artifacts_agave[@]}"
-# repo_artifacts["$repo_solfuzz"]="${artifacts_solfuzz[@]}"
+repo_artifacts["$repo_solfuzz"]="${artifacts_solfuzz[@]}"
 
 mkdir -p temp/
 
