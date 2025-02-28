@@ -3,9 +3,7 @@
     .version = "0.1.0",
     .paths = .{""},
     .dependencies = .{
-        .sig = .{
-            .path = "../sig",
-        },
+        .sig = .{ .path = "sig/" },
         .pb = .{
             .url = "git+https://github.com/Arwalk/zig-protobuf#57a0ebec594c04131f8c55aafa484bb08cc9ba2f",
             .hash = "12204deee91a1a52a1247a7cf829464351393be706927c05535ea238ee1edb974a4b",

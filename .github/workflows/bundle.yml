@@ -1,0 +1,50 @@
+name: Bundle for FuzzCorp
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sig, solfuzz_main, solfuzz_agave]
+  push:
+    branches:
+    - master
+    - Rexicon226/solfuzz-ci
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sig-fuzz
+        uses: actions/checkout@v4
+
+      - name: Checkout Sig
+        uses: actions/checkout@v4
+        with:
+          repository: Syndica/sig
+          path: sig/
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build sig-fuzz
+        run: zig build -Dcpu=haswell --summary all
+          
+      # TODO: download solfuzz_agave and solfuzz's "fuzz_sol" binaries here
+
+      - name: Download solfuzz_agave Artifacts
+        run: ./scripts/download_artifacts.sh
+
+      - name: Download SolFuzz Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.PAT }}
+          repository: firedancer-io/solfuzz
+          run-id: ${{ github.event.client_payload.run_id}}
+          name: solfuzz-bins
+          path: ./bundle
+    
+      - name: Bundle
+        run: ./scripts/bundle.sh
+
+      - run: ls -R bundle
+ 
