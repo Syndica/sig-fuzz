@@ -19,7 +19,7 @@
     ]
   },
   "lineage": "sol_elf_loader_diff",
-  "corpusGroup": "sol_elf_ctx",
+  "corpusGroup": "sol_elf_loader",
   "architecture": {
     "base": "x86_64",
     "ext": [
