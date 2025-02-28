@@ -30,7 +30,13 @@ export fn sol_compat_elf_loader_v1(
     // const allocator = gpa.allocator();
 
     const in_slice: []const u8 = in_ptr[0..in_size];
-    const ctx = ELFLoaderCtx.decode(in_slice, allocator) catch return 0;
+
+    // zig_protobuf leaks sometimes on invalid input, so we just work around with
+    // by using an arena
+    var decode_arena = std.heap.ArenaAllocator.init(allocator);
+    defer decode_arena.deinit();
+
+    const ctx = ELFLoaderCtx.decode(in_slice, decode_arena.allocator()) catch return 0;
     defer ctx.deinit();
 
     const elf_effects = executeElfTest(ctx, allocator) catch return 0;

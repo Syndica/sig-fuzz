@@ -27,11 +27,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const lib = b.addSharedLibrary(.{
-        .name = "elf",
+        .name = "solfuzz_sig",
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("src/lib.zig"),
     });
+    lib.root_module.omit_frame_pointer = false;
     lib.root_module.addImport("sig", sig.module("sig"));
     lib.root_module.addImport("protobuf", pb.module("protobuf"));
     lib.step.dependOn(&protoc_step.step);
