@@ -34,7 +34,7 @@ jobs:
       - name: Bundle
         run: ./scripts/bundle.sh
 
-      - name: upload to FuzzCorp
+      - name: Upload to FuzzCorp
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AKID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SKID }}
