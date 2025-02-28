@@ -32,6 +32,8 @@ jobs:
       # TODO: download solfuzz_agave and solfuzz's "fuzz_sol" binaries here
 
       - name: Download solfuzz_agave Artifacts
+        env: 
+          PAT: ${{ secrets.PAT }}
         run: ./scripts/download_artifacts.sh
 
       - name: Download SolFuzz Artifacts
