@@ -1,5 +1,11 @@
 const std = @import("std");
 
+comptime {
+    _ = @import("elf.zig");
+    _ = @import("vm_validate.zig");
+    _ = @import("shred_parse.zig");
+}
+
 pub const std_options: std.Options = .{
     .log_level = .warn,
 };
@@ -260,10 +266,4 @@ const FEATURES: SolCompatFeatures = .{
 
 export fn sol_compat_get_features_v1() *const SolCompatFeatures {
     return &FEATURES;
-}
-
-comptime {
-    _ = &@import("elf.zig");
-    // _ = &@import("vm.zig");
-    _ = &@import("shred_parse.zig");
 }
