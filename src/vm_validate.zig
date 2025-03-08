@@ -95,7 +95,7 @@ fn validateVmText(
         bytes,
         &loader,
         &function_registery,
-        // false, TODO: re-enable when the validation PR is merged
+        false,
         .{
             .minimum_version = min_version,
             .maximum_version = max_version,
