@@ -5,7 +5,7 @@ const protobuf = @import("protobuf");
 
 const SyscallContext = pb.SyscallContext;
 
-const svm = sig.svm;
+const svm = sig.vm;
 const syscalls = svm.syscalls;
 const Elf = svm.Elf;
 const Executable = svm.Executable;
@@ -16,6 +16,7 @@ const Region = memory.Region;
 const Vm = svm.Vm;
 const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
+const Version = svm.sbpf.Version;
 
 const HEAP_MAX = 256 * 1024;
 const STACK_SIZE = 4_096 * 64;
@@ -61,7 +62,7 @@ fn executeVmTest(
     const config: Config = .{ .minimum_version = .v1 };
     const vm_ctx = syscall_context.vm_ctx.?;
     const rodata_slice = vm_ctx.rodata.getSlice();
-    const version: svm.sbpf.Version = @enumFromInt(vm_ctx.sbpf_version);
+    const version: Version = @enumFromInt(vm_ctx.sbpf_version);
     if (version != .v1) return error.SupportThisVersion;
 
     const function_registry: Registry(u64) = .{};

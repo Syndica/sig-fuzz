@@ -3,7 +3,7 @@ const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const protobuf = @import("protobuf");
 const sig = @import("sig");
 
-const svm = sig.svm;
+const svm = sig.vm;
 const FullVmContext = pb.FullVmContext;
 const VmContext = pb.VmContext;
 const ValidateVmEffects = pb.ValidateVmEffects;

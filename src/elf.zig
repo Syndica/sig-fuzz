@@ -6,7 +6,7 @@ const protobuf = @import("protobuf");
 const ELFLoaderCtx = pb.ELFLoaderCtx;
 const ElfLoaderEffects = pb.ELFLoaderEffects;
 
-const svm = sig.svm;
+const svm = sig.vm;
 const syscalls = svm.syscalls;
 const Elf = svm.Elf;
 const Executable = svm.Executable;
