@@ -14,7 +14,7 @@ const TransactionContextAccount = sig.runtime.transaction_context.TransactionCon
 
 const Pubkey = sig.core.Pubkey;
 
-fn printPbInstrContext(ctx: pb.InstrContext) !void {
+pub fn printPbInstrContext(ctx: pb.InstrContext) !void {
     var buffer = [_]u8{0} ** (1024 * 1024);
     var fbs = std.io.fixedBufferStream(&buffer);
     var writer = fbs.writer();
@@ -45,7 +45,7 @@ fn printPbInstrContext(ctx: pb.InstrContext) !void {
     std.debug.print("{s}", .{writer.context.getWritten()});
 }
 
-fn printPbInstrEffects(effects: pb.InstrEffects) !void {
+pub fn printPbInstrEffects(effects: pb.InstrEffects) !void {
     var buffer = [_]u8{0} ** (1024 * 1024);
     var fbs = std.io.fixedBufferStream(&buffer);
     var writer = fbs.writer();

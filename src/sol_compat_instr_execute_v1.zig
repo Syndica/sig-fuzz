@@ -17,6 +17,9 @@ const Pubkey = sig.core.Pubkey;
 
 const intFromInstructionError = sig.core.instruction.intFromInstructionError;
 
+const printPbInstrContext = @import("debug.zig").printPbInstrContext;
+const printPbInstrEffects = @import("debug.zig").printPbInstrEffects;
+
 /// [fd] https://github.com/firedancer-io/firedancer/blob/0ad2143a9960b7daa5eb594367835d0cbae25657/src/flamenco/runtime/tests/fd_exec_sol_compat.c#L591
 /// [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/98f939ba8afcb1b7a5af4316c6085f92111b62a7/src/lib.rs#L1043
 export fn sol_compat_instr_execute_v1(
@@ -43,7 +46,7 @@ export fn sol_compat_instr_execute_v1(
     //     return 0;
     // };
 
-    const result = executeInstrProto(allocator, ctx) catch |err| {
+    const result = executeInstrProto(allocator, ctx, false) catch |err| {
         std.debug.print("err: {s}\n", .{@errorName(err)});
         return 0;
     };
@@ -67,7 +70,7 @@ export fn sol_compat_instr_execute_v1(
 }
 
 /// [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/98f939ba8afcb1b7a5af4316c6085f92111b62a7/src/lib.rs#L473-L474
-fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext) !pb.InstrEffects {
+fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
     // Create the execution contexts from the protobuf InstrContext
     // [fd] https://github.com/firedancer-io/firedancer/blob/b5acf851f523ec10a85e1b0c8756b2aea477107e/src/flamenco/runtime/tests/fd_exec_instr_test.c#L359-L360
     const ec = sig.runtime.transaction_context.EpochContext{
@@ -102,11 +105,20 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext) !pb.Ins
         .compute_meter = ctx.cu_avail,
         .compute_budget = sig.runtime.ComputeBudget.default(ctx.cu_avail),
         .custom_error = null,
-        .log_collector = null,
+        .log_collector = if (emit_logs) sig.runtime.LogCollector.init(null) else null,
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
     defer tc.deinit();
+
+    // [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/98f939ba8afcb1b7a5af4316c6085f92111b62a7/src/lib.rs#L740-L746
+    if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
+        if (recent_blockhashes.entries.len > 0) {
+            const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
+            tc.prev_blockhash = prev_entry.blockhash;
+            tc.prev_lamports_per_signature = prev_entry.fee_calculator.lamports_per_signature;
+        }
+    }
 
     const instr_info = try createInstructionInfo(
         allocator,
@@ -130,6 +142,14 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext) !pb.Ins
             else => |e| result = e,
         }
     };
+
+    // Print log if `log` is enabled
+    if (tc.log_collector) |log_collector| {
+        std.debug.print("Execution Logs:\n", .{});
+        for (log_collector.collect(), 1..) |msg, index| {
+            std.debug.print("    {}: {s}\n", .{ index, msg });
+        }
+    }
 
     // Capture the instruction effects
     // [fd] https://github.com/firedancer-io/firedancer/blob/b5acf851f523ec10a85e1b0c8756b2aea477107e/src/flamenco/runtime/tests/fd_exec_instr_test.c#L1480-L1572
@@ -198,7 +218,7 @@ fn createFeatureSet(
     var indexed_features = std.AutoArrayHashMap(u64, Pubkey).init(allocator);
     defer indexed_features.deinit();
 
-    for (features.ALL_FEATURES) |feature| {
+    for (features.FEATURES) |feature| {
         const feature_id = @as(u64, feature.data[0]) |
             @as(u64, feature.data[1]) << 8 |
             @as(u64, feature.data[2]) << 16 |
