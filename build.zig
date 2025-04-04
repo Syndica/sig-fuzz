@@ -26,6 +26,16 @@ pub fn build(b: *std.Build) void {
         .include_directories = &.{"protosol/proto"},
     });
 
+    const test_exe = b.addTest(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_exe.root_module.addImport("protobuf", pb.module("protobuf"));
+    test_exe.root_module.addImport("sig", sig.module("sig"));
+    const test_step = b.step("test", "");
+    test_step.dependOn(&b.addRunArtifact(test_exe).step);
+
     const lib = b.addSharedLibrary(.{
         .name = "solfuzz_sig",
         .target = target,
