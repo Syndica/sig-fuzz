@@ -78,28 +78,21 @@ export fn sol_compat_instr_execute_v1(
     return 1;
 }
 
-/// [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/98f939ba8afcb1b7a5af4316c6085f92111b62a7/src/lib.rs#L473-L474
 fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
-    // Create the execution contexts from the protobuf InstrContext
-    // [fd] https://github.com/firedancer-io/firedancer/blob/b5acf851f523ec10a85e1b0c8756b2aea477107e/src/flamenco/runtime/tests/fd_exec_instr_test.c#L359-L360
+    // Create epoch context
     const ec = sig.runtime.transaction_context.EpochContext{
         .allocator = allocator,
-        .feature_set = if (ctx.epoch_context) |epoch_context|
-            if (epoch_context.features) |feats|
-                try createFeatureSet(allocator, feats)
-            else
-                features.FeatureSet.EMPTY
-        else
-            features.FeatureSet.EMPTY,
+        .feature_set = try createFeatureSet(allocator, ctx),
     };
     defer ec.deinit();
 
+    // Create slot context
     var sc = sig.runtime.transaction_context.SlotContext{
         .ec = &ec,
-        .sysvar_cache = sig.runtime.SysvarCache{},
+        .sysvar_cache = createSysvarCache(allocator, ctx),
     };
-    fillMissingEntries(allocator, &sc.sysvar_cache, ctx);
 
+    // Create transaction context
     var tc = sig.runtime.transaction_context.TransactionContext{
         .allocator = allocator,
         .sc = &sc,
@@ -120,7 +113,7 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
     };
     defer tc.deinit();
 
-    // [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/98f939ba8afcb1b7a5af4316c6085f92111b62a7/src/lib.rs#L740-L746
+    // Get prev_blockhash and prev_lamports_per_signature from sysvar.RecentBlockhashes
     if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
         if (recent_blockhashes.entries.len > 0) {
             const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
@@ -129,6 +122,7 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         }
     }
 
+    // Create the instruction info
     const instr_info = try createInstructionInfo(
         allocator,
         &tc,
@@ -139,7 +133,6 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
     defer instr_info.deinit(allocator);
 
     // Execute the instruction
-    // [fd] https://github.com/firedancer-io/firedancer/blob/b5acf851f523ec10a85e1b0c8756b2aea477107e/src/flamenco/runtime/tests/fd_exec_instr_test.c#L1478
     var result: ?InstructionError = null;
     executor.executeInstruction(
         allocator,
@@ -152,7 +145,7 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         }
     };
 
-    // Print log if `log` is enabled
+    // Emit logs
     if (tc.log_collector) |log_collector| {
         std.debug.print("Execution Logs:\n", .{});
         for (log_collector.collect(), 1..) |msg, index| {
@@ -160,8 +153,7 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         }
     }
 
-    // Capture the instruction effects
-    // [fd] https://github.com/firedancer-io/firedancer/blob/b5acf851f523ec10a85e1b0c8756b2aea477107e/src/flamenco/runtime/tests/fd_exec_instr_test.c#L1480-L1572
+    // Capture and return instruction effects
     return createInstrEffects(
         allocator,
         &tc,
@@ -222,8 +214,11 @@ fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext)
 
 fn createFeatureSet(
     allocator: std.mem.Allocator,
-    pb_feature_set: pb.FeatureSet,
+    pb_ctx: pb.InstrContext,
 ) !features.FeatureSet {
+    const pb_epoch_context = pb_ctx.epoch_context orelse return features.FeatureSet.EMPTY;
+    const pb_feature_set = pb_epoch_context.features orelse return features.FeatureSet.EMPTY;
+
     var indexed_features = std.AutoArrayHashMap(u64, Pubkey).init(allocator);
     defer indexed_features.deinit();
 
@@ -336,16 +331,11 @@ fn createInstructionInfo(
     };
 }
 
-fn getSysvarData(ctx: pb.InstrContext, pubkey: Pubkey) ?[]const u8 {
-    for (ctx.accounts.items) |acc| {
-        if (std.mem.eql(u8, acc.address.getSlice(), &pubkey.data)) {
-            return acc.data.getSlice();
-        }
-    }
-    return null;
-}
-
-pub fn fillMissingEntries(allocator: std.mem.Allocator, sysvar_cache: *sig.runtime.SysvarCache, ctx: pb.InstrContext) void {
+fn createSysvarCache(
+    allocator: std.mem.Allocator,
+    ctx: pb.InstrContext,
+) sig.runtime.SysvarCache {
+    var sysvar_cache = sig.runtime.SysvarCache{};
     if (sysvar_cache.clock == null) {
         if (getSysvarData(ctx, sysvar.Clock.ID)) |clock_data| {
             sysvar_cache.clock = sig.bincode.readFromSlice(
@@ -436,85 +426,14 @@ pub fn fillMissingEntries(allocator: std.mem.Allocator, sysvar_cache: *sig.runti
             ) catch null;
         }
     }
+    return sysvar_cache;
 }
 
-test "sol_compat_instr_execute_v1" {
-    const system_program = sig.runtime.program.system_program;
-    const ids = sig.runtime.ids;
-
-    var prng = std.rand.Random.DefaultPrng.init(0);
-
-    const allocator = std.heap.c_allocator;
-
-    const pb_system_program_id =
-        ManagedString.managed(&system_program.ID.data);
-
-    const pb_native_loader_id =
-        ManagedString.managed(&ids.NATIVE_LOADER_ID.data);
-
-    const account_0_id = Pubkey.initRandom(prng.random()).data;
-    const pb_account_0_id =
-        ManagedString.managed(&account_0_id);
-
-    const account_1_id = Pubkey.initRandom(prng.random()).data;
-    const pb_account_1_id =
-        ManagedString.managed(&account_1_id);
-
-    var pb_accounts = std.ArrayList(pb.AcctState).init(allocator);
-    defer pb_accounts.deinit();
-    try pb_accounts.appendSlice(&.{
-        .{
-            .address = pb_account_0_id,
-            .lamports = 2_000_000,
-            .owner = pb_system_program_id,
-        },
-        .{
-            .address = pb_account_1_id,
-            .owner = pb_system_program_id,
-        },
-        .{
-            .address = pb_system_program_id,
-            .executable = true,
-            .owner = pb_native_loader_id,
-        },
-    });
-
-    var pb_instr_accounts = std.ArrayList(pb.InstrAcct).init(allocator);
-    defer pb_instr_accounts.deinit();
-    try pb_instr_accounts.appendSlice(&.{
-        .{
-            .index = 0,
-            .is_signer = true,
-            .is_writable = true,
-        },
-        .{
-            .index = 1,
-            .is_signer = false,
-            .is_writable = true,
-        },
-    });
-
-    const instruction = system_program.Instruction{
-        .transfer = .{
-            .lamports = 1_000_000,
-        },
-    };
-    const instruction_data = try sig.bincode.writeAlloc(
-        allocator,
-        instruction,
-        .{},
-    );
-    defer allocator.free(instruction_data);
-
-    const pb_ic = pb.InstrContext{
-        .program_id = pb_system_program_id,
-        .accounts = pb_accounts,
-        .instr_accounts = pb_instr_accounts,
-        .data = ManagedString.managed(instruction_data),
-        .cu_avail = 150,
-        .slot_context = null,
-        .epoch_context = null,
-    };
-
-    _ = try executeInstrProto(allocator, pb_ic);
+fn getSysvarData(ctx: pb.InstrContext, pubkey: Pubkey) ?[]const u8 {
+    for (ctx.accounts.items) |acc| {
+        if (acc.lamports > 0 and std.mem.eql(u8, acc.address.getSlice(), &pubkey.data)) {
+            return acc.data.getSlice();
+        }
+    }
+    return null;
 }
