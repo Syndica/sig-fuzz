@@ -95,6 +95,7 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
     // Create transaction context
     var tc = sig.runtime.transaction_context.TransactionContext{
         .allocator = allocator,
+        .ec = &ec,
         .sc = &sc,
         .accounts = try createTransactionContextAccounts(
             allocator,
@@ -344,6 +345,9 @@ fn createSysvarCache(
                 clock_data,
                 .{},
             ) catch null;
+        } else {
+            sysvar_cache.clock = sysvar.Clock.DEFAULT;
+            sysvar_cache.clock.?.slot = 10;
         }
     }
     if (sysvar_cache.epoch_rewards == null) {
@@ -364,6 +368,8 @@ fn createSysvarCache(
                 epoch_schedule_data,
                 .{},
             ) catch null;
+        } else {
+            sysvar_cache.epoch_schedule = sysvar.EpochSchedule.DEFAULT;
         }
     }
     if (sysvar_cache.last_restart_slot == null) {
@@ -374,6 +380,8 @@ fn createSysvarCache(
                 last_restart_slot_data,
                 .{},
             ) catch null;
+        } else {
+            sysvar_cache.last_restart_slot = sysvar.LastRestartSlot{ .last_restart_slot = 5000 };
         }
     }
     if (sysvar_cache.rent == null) {
@@ -384,6 +392,8 @@ fn createSysvarCache(
                 rent_data,
                 .{},
             ) catch null;
+        } else {
+            sysvar_cache.rent = sysvar.Rent.DEFAULT;
         }
     }
     if (sysvar_cache.slot_hashes == null) {
