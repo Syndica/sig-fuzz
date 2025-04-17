@@ -27,22 +27,22 @@ export fn sol_compat_instr_execute_v1(
     defer decode_arena.deinit();
 
     const in_slice = in_ptr[0..in_size];
-    var ctx = pb.InstrContext.decode(
+    var pb_instr_ctx = pb.InstrContext.decode(
         in_slice,
         decode_arena.allocator(),
     ) catch |err| {
         std.debug.print("pb.InstrContext.decode: {s}\n", .{@errorName(err)});
         return 0;
     };
-    defer ctx.deinit();
+    defer pb_instr_ctx.deinit();
 
     // printPbInstrContext(ctx) catch |err| {
     //     std.debug.print("printPbInstrContext: {s}\n", .{@errorName(err)});
     //     return 0;
     // };
 
-    const result = executeInstrProto(allocator, ctx, EMIT_LOGS) catch |err| {
-        std.debug.print("executeInstrProto: {s}\n", .{@errorName(err)});
+    const result = executeInstruction(allocator, pb_instr_ctx, EMIT_LOGS) catch |err| {
+        std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
         return 0;
     };
 
@@ -68,10 +68,10 @@ export fn sol_compat_instr_execute_v1(
     return 1;
 }
 
-fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
+fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
     const ec, const sc, const tc = try utils.createExecutionContexts(
         allocator,
-        ctx,
+        pb_instr_ctx,
         emit_logs,
     );
     defer {
@@ -83,26 +83,15 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         allocator.destroy(tc);
     }
 
-    // Get prev_blockhash and prev_lamports_per_signature from sysvar.RecentBlockhashes
-    if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
-        if (recent_blockhashes.entries.len > 0) {
-            const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
-            tc.prev_blockhash = prev_entry.blockhash;
-            tc.prev_lamports_per_signature = prev_entry.fee_calculator.lamports_per_signature;
-        }
-    }
-
-    // Create the instruction info
     const instr_info = try utils.createInstructionInfo(
         allocator,
         tc,
-        .{ .data = ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
-        ctx.data.getSlice(),
-        ctx.instr_accounts.items,
+        .{ .data = pb_instr_ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
+        pb_instr_ctx.data.getSlice(),
+        pb_instr_ctx.instr_accounts.items,
     );
     defer instr_info.deinit(allocator);
 
-    // Execute the instruction
     var result: ?InstructionError = null;
     executor.executeInstruction(
         allocator,
@@ -115,7 +104,6 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         }
     };
 
-    // Emit logs
     if (tc.log_collector) |log_collector| {
         std.debug.print("Execution Logs:\n", .{});
         for (log_collector.collect(), 1..) |msg, index| {
@@ -123,7 +111,6 @@ fn executeInstrProto(allocator: std.mem.Allocator, ctx: pb.InstrContext, emit_lo
         }
     }
 
-    // Capture and return instruction effects
     return utils.createInstrEffects(
         allocator,
         tc,

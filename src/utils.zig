@@ -60,6 +60,14 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .prev_lamports_per_signature = 0,
     };
 
+    if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
+        if (recent_blockhashes.entries.len > 0) {
+            const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
+            tc.prev_blockhash = prev_entry.blockhash;
+            tc.prev_lamports_per_signature = prev_entry.fee_calculator.lamports_per_signature;
+        }
+    }
+
     return .{ ec, sc, tc };
 }
 
