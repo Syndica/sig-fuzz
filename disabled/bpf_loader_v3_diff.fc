@@ -18,8 +18,8 @@
       }
     ]
   },
-  "lineage": "sol_prog_system_diff",
-  "corpusGroup": "sol_prog_system_diff",
+  "lineage": "sol_prog_bpf_loader_v3_diff",
+  "corpusGroup": "sol_prog_bpf_loader_v3_diff",
   "architecture": {
     "base": "x86_64",
     "ext": [
@@ -34,7 +34,7 @@
     },
     {
       "key": "SOLFUZZ_PROGRAM_ID",
-      "value": "11111111111111111111111111111111"
+      "value": "BPFLoaderUpgradeab1e11111111111111111111111"
     }
   ]
 }
