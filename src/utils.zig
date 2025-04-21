@@ -48,6 +48,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
             allocator,
             instr_ctx.accounts.items,
         ),
+        .serialized_accounts = .{},
         .instruction_stack = .{},
         .instruction_trace = .{},
         .return_data = .{},

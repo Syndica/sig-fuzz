@@ -4,7 +4,7 @@ comptime {
     _ = @import("elf.zig");
     _ = @import("vm_validate.zig");
     _ = @import("shred_parse.zig");
-    _ = @import("sol_compat_instr_execute_v1.zig");
+    _ = @import("instr_execute_v1.zig");
 }
 
 pub const std_options: std.Options = .{
