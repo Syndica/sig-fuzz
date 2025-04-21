@@ -83,6 +83,7 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
         allocator.destroy(tc);
     }
 
+    if (pb_instr_ctx.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
         allocator,
         tc,
