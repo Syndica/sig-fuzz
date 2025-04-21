@@ -26,7 +26,8 @@ const TransactionContextAccount = sig.runtime.transaction_context.TransactionCon
 
 const Pubkey = sig.core.Pubkey;
 
-const EMIT_LOGS = true;
+const EMIT_LOGS = false;
+
 const HEAP_MAX = 256 * 1024;
 const STACK_SIZE = 4_096 * 64;
 
@@ -54,10 +55,20 @@ export fn sol_compat_vm_syscall_execute_v1(
     };
     defer ctx.deinit();
 
+    // utils.printPbSyscallContext(ctx) catch |err| {
+    //     std.debug.print("printPbSyscallContext: {s}\n", .{@errorName(err)});
+    //     return 0;
+    // };
+
     const result = executeSyscall(allocator, ctx, EMIT_LOGS) catch |err| {
         std.debug.print("executeSyscall: {s}\n", .{@errorName(err)});
         return 0;
     };
+
+    // utils.printPbSyscallEffects(result) catch |err| {
+    //     std.debug.print("printPbSyscallEffects: {s}\n", .{@errorName(err)});
+    //     return 0;
+    // };
 
     const result_bytes = try result.encode(allocator);
     defer allocator.free(result_bytes);
@@ -82,14 +93,8 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         return error.NoInstrCtx;
     const pb_vm = pb_syscall_ctx.vm_ctx orelse
         return error.NoVmCtx;
-    const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse return error.NoSyscallInvocation;
-
-    // Print syscall context for debugging
-    try utils.printPbInstrContext(pb_instr);
-    try utils.printPbVmContext(pb_vm);
-    try utils.printPbSyscallInvocation(pb_syscall_invocation);
-    if (pb_syscall_ctx.exec_effects) |exec_effects|
-        try utils.printPbInstrEffects(exec_effects);
+    const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse
+        return error.NoSyscallInvocation;
 
     // // [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_syscalls.rs#L75-L87
     // blk: {
@@ -117,7 +122,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const ec, const sc, const tc = try utils.createExecutionContexts(
         allocator,
         pb_instr,
-        emit_logs,
     );
     defer {
         ec.deinit();
@@ -228,8 +232,11 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
 
     const heap = try allocator.alloc(u8, heap_max);
+    defer allocator.free(heap);
     @memset(heap, 0);
+
     const stack = try allocator.alloc(u8, STACK_SIZE);
+    defer allocator.free(stack);
     @memset(stack, 0);
 
     std.mem.copyForwards(u8, heap, pb_syscall_invocation.heap_prefix.getSlice());
@@ -244,6 +251,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
     try mm_regions.appendSlice(allocator, regions);
+    const fixture_input_region_start = mm_regions.items.len;
 
     var input_data_offset: u64 = 0;
     for (pb_vm.input_data_regions.items) |input_region| {
@@ -264,8 +272,8 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         input_data_offset += input_region.content.getSlice().len;
     }
     defer {
-        for (mm_regions.items) |region| {
-            if (region.vm_addr_start >= memory.INPUT_START) {
+        for (mm_regions.items, 0..) |region, i| {
+            if (i >= fixture_input_region_start) {
                 allocator.free(region.constSlice());
             }
         }
@@ -277,6 +285,8 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         version,
         config,
     );
+    defer map.deinit(allocator);
+
     var vm = try Vm.init(
         allocator,
         &executable,
@@ -299,43 +309,13 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     vm.registers.set(.r9, pb_vm.r9);
     vm.registers.set(.r10, pb_vm.r10);
 
-    // Print Effects Prior to Execution
-    const pre_effects = pb.SyscallEffects{
-        .@"error" = 0,
-        .error_kind = .UNSPECIFIED,
-        .cu_avail = tc.compute_meter,
-        .heap = try ManagedString.copy(heap, allocator),
-        .stack = try ManagedString.copy(stack, allocator),
-        .inputdata = .Empty, // Deprecated
-        .input_data_regions = try utils.extractInputDataRegions(
-            allocator,
-            vm.memory_map,
-        ),
-        .frame_count = vm.depth,
-        .log = .Empty,
-        .rodata = try ManagedString.copy(rodata, allocator),
-        // Registers are only for Vm Interp
-        .r0 = 0,
-        .r1 = 0,
-        .r2 = 0,
-        .r3 = 0,
-        .r4 = 0,
-        .r5 = 0,
-        .r6 = 0,
-        .r7 = 0,
-        .r8 = 0,
-        .r9 = 0,
-        .r10 = 0,
-        .pc = 0,
-    };
-    try utils.printPbSyscallEffect(pre_effects);
-
     // Lookup syscall
     const syscall_name = pb_syscall_ctx.syscall_invocation.?.function_name.getSlice();
-    const syscall_fn = if (std.mem.eql(u8, syscall_name, "abort"))
-        syscalls.abort
-    else
-        return error.SycallNotFound;
+    const syscall_entry = syscall_registry.functions.lookupName(syscall_name) orelse {
+        std.debug.print("Syscall not found: {s}\n", .{syscall_name});
+        return error.SyscallNotFound;
+    };
+    const syscall_fn = syscall_entry.value;
 
     // Execute syscall and capture error
     var execution_error: ?sig.vm.ExecutionError = null;
@@ -355,57 +335,25 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         try sig.runtime.stable_log.programFailure(tc, instr_info.program_meta.pubkey, msg);
     }
 
-    // Collect logs
-    var log = std.ArrayList(u8).init(allocator);
-    defer log.deinit();
-    if (tc.log_collector) |log_collector| {
-        for (log_collector.collect()) |msg| {
-            try log.appendSlice(msg);
-            try log.append('\n');
-        }
-        _ = log.pop();
-    }
-
     // Capture Effects
-    const effects = pb.SyscallEffects{
-        .@"error" = @"error",
-        .error_kind = error_kind,
-        .cu_avail = tc.compute_meter,
-        .heap = try ManagedString.copy(heap, allocator),
-        .stack = try ManagedString.copy(stack, allocator),
-        .inputdata = .Empty, // Deprecated
-        .input_data_regions = try utils.extractInputDataRegions(
-            allocator,
-            vm.memory_map,
-        ),
+    const effects = try utils.createSyscallEffect(allocator, .{
+        .tc = tc,
+        .err = @"error",
+        .err_kind = error_kind,
+        .heap = heap,
+        .stack = stack,
+        .rodata = rodata,
         .frame_count = vm.depth,
-        .log = try ManagedString.copy(log.items, allocator),
-        .rodata = try ManagedString.copy(rodata, allocator),
-        // Registers are only for Vm Interp
-        .r0 = 0,
-        .r1 = 0,
-        .r2 = 0,
-        .r3 = 0,
-        .r4 = 0,
-        .r5 = 0,
-        .r6 = 0,
-        .r7 = 0,
-        .r8 = 0,
-        .r9 = 0,
-        .r10 = 0,
-        .pc = 0,
-    };
+        .memory_map = vm.memory_map,
+    });
 
     // Emit logs
-    if (tc.log_collector) |log_collector| {
+    if (emit_logs) {
         std.debug.print("Execution Logs:\n", .{});
-        for (log_collector.collect(), 1..) |msg, index| {
+        for (tc.log_collector.?.collect(), 1..) |msg, index| {
             std.debug.print("    {}: {s}\n", .{ index, msg });
         }
     }
-
-    // Print syscall effects for debugging
-    try utils.printPbSyscallEffect(effects);
 
     return effects;
 }
@@ -515,4 +463,81 @@ pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { u8, pb.ErrKin
             return error.SigError;
         },
     };
+}
+
+test executeSyscall {
+    const allocator = std.testing.allocator;
+    const program_id = sig.runtime.program.system_program.ID;
+    const bpf_loader_id = sig.runtime.program.bpf_loader_program.v3.ID;
+
+    var accounts = std.ArrayList(pb.AcctState).init(allocator);
+    defer accounts.deinit();
+    try accounts.append(.{
+        .address = ManagedString.static(&program_id.data),
+        .lamports = 123456789,
+        .data = ManagedString.static(&[_]u8{0} ** 100),
+        .executable = true,
+        .rent_epoch = 18446744073709551615,
+        .owner = ManagedString.static(&bpf_loader_id.data),
+    });
+
+    const instr_accounts = std.ArrayList(pb.InstrAcct).init(allocator);
+    defer instr_accounts.deinit();
+
+    const pb_instr = pb.InstrContext{
+        .program_id = ManagedString.static(&program_id.data),
+        .accounts = accounts,
+        .instr_accounts = instr_accounts,
+        .data = .Empty,
+        .cu_avail = 5,
+    };
+
+    const input_data_regions = std.ArrayList(pb.InputDataRegion).init(allocator);
+    defer input_data_regions.deinit();
+
+    const pb_vm = pb.VmContext{
+        .heap_max = 5,
+        .rodata = .Empty,
+        .rodata_text_section_offset = 0,
+        .rodata_text_section_length = 0,
+        .input_data_regions = input_data_regions,
+        .r0 = 0,
+        .r1 = 12884901888,
+        .r2 = 5,
+        .r3 = 1,
+        .r4 = 2,
+        .r5 = 0,
+        .r6 = 0,
+        .r7 = 0,
+        .r8 = 0,
+        .r9 = 0,
+        .r10 = 0,
+        .r11 = 0,
+        .check_align = false,
+        .check_size = false,
+        .entry_pc = 0,
+        .call_whitelist = .Empty,
+        .tracing_enabled = false,
+        .return_data = null,
+        .sbpf_version = 0,
+    };
+
+    const syscall_invocation = pb.SyscallInvocation{
+        .function_name = ManagedString.static("sol_panic_"),
+        .heap_prefix = ManagedString.static(&[_]u8{ 104, 101, 108, 108, 111 }),
+        .stack_prefix = .Empty,
+    };
+
+    const pb_syscall = pb.SyscallContext{
+        .instr_ctx = pb_instr,
+        .vm_ctx = pb_vm,
+        .syscall_invocation = syscall_invocation,
+        .exec_effects = null,
+    };
+
+    var result = executeSyscall(allocator, pb_syscall, false) catch |err| {
+        std.debug.print("executeSyscall: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer result.deinit();
 }
