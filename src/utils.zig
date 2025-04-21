@@ -22,7 +22,7 @@ const intFromInstructionError = sig.core.instruction.intFromInstructionError;
 
 const EMIT_LOGS = false;
 
-pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.InstrContext, emit_logs: bool) !struct {
+pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.InstrContext) !struct {
     *EpochContext,
     *SlotContext,
     *TransactionContext,
@@ -56,7 +56,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .compute_meter = instr_ctx.cu_avail,
         .compute_budget = sig.runtime.ComputeBudget.default(instr_ctx.cu_avail),
         .custom_error = null,
-        .log_collector = if (emit_logs) sig.runtime.LogCollector.init(null) else null,
+        .log_collector = sig.runtime.LogCollector.init(null),
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
@@ -350,6 +350,58 @@ fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext)
     return accounts;
 }
 
+pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
+    tc: *const TransactionContext,
+    err: i64,
+    err_kind: pb.ErrKind,
+    heap: []const u8,
+    stack: []const u8,
+    rodata: []const u8,
+    frame_count: u64,
+    memory_map: memory.MemoryMap,
+}) !pb.SyscallEffects {
+    var log = std.ArrayList(u8).init(allocator);
+    defer log.deinit();
+    if (params.tc.log_collector) |log_collector| {
+        for (log_collector.collect()) |msg| {
+            try log.appendSlice(msg);
+            try log.append('\n');
+        }
+        if (log.items.len > 0) _ = log.pop();
+    }
+
+    const input_data_regions = try extractInputDataRegions(
+        allocator,
+        params.memory_map,
+    );
+
+    return .{
+        .@"error" = params.err,
+        .error_kind = params.err_kind,
+        .cu_avail = params.tc.compute_meter,
+        .heap = try ManagedString.copy(params.heap, allocator),
+        .stack = try ManagedString.copy(params.stack, allocator),
+        .inputdata = .Empty, // Deprecated
+        .input_data_regions = input_data_regions,
+        .frame_count = params.frame_count,
+        .log = try ManagedString.copy(log.items, allocator),
+        .rodata = try ManagedString.copy(params.rodata, allocator),
+        // Registers are only for Vm Interp
+        .r0 = 0,
+        .r1 = 0,
+        .r2 = 0,
+        .r3 = 0,
+        .r4 = 0,
+        .r5 = 0,
+        .r6 = 0,
+        .r7 = 0,
+        .r8 = 0,
+        .r9 = 0,
+        .r10 = 0,
+        .pc = 0,
+    };
+}
+
 pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
     var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
     errdefer regions.deinit();
@@ -502,7 +554,21 @@ pub fn printPbSyscallInvocation(ctx: pb.SyscallInvocation) !void {
     std.debug.print("{s}", .{writer.context.getWritten()});
 }
 
-pub fn printPbSyscallEffect(ctx: pb.SyscallEffects) !void {
+pub fn printPbSyscallContext(pb_syscall_ctx: pb.SyscallContext) !void {
+    const pb_instr = pb_syscall_ctx.instr_ctx orelse
+        return error.NoInstrCtx;
+    const pb_vm = pb_syscall_ctx.vm_ctx orelse
+        return error.NoVmCtx;
+    const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse
+        return error.NoSyscallInvocation;
+    try printPbInstrContext(pb_instr);
+    try printPbVmContext(pb_vm);
+    try printPbSyscallInvocation(pb_syscall_invocation);
+    if (pb_syscall_ctx.exec_effects) |exec_effects|
+        try printPbInstrEffects(exec_effects);
+}
+
+pub fn printPbSyscallEffects(ctx: pb.SyscallEffects) !void {
     var buffer = [_]u8{0} ** (1024 * 1024);
     var fbs = std.io.fixedBufferStream(&buffer);
     var writer = fbs.writer();
