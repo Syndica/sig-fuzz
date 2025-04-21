@@ -49,6 +49,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
             allocator,
             instr_ctx.accounts.items,
         ),
+        .serialized_accounts = .{},
         .instruction_stack = .{},
         .instruction_trace = .{},
         .return_data = .{},
@@ -56,7 +57,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .compute_meter = instr_ctx.cu_avail,
         .compute_budget = sig.runtime.ComputeBudget.default(instr_ctx.cu_avail),
         .custom_error = null,
-        .log_collector = sig.runtime.LogCollector.init(null),
+        .log_collector = sig.runtime.LogCollector.default(),
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };

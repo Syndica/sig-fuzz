@@ -225,8 +225,8 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     defer {
         allocator.free(parameter_bytes);
         allocator.free(regions);
-        allocator.free(accounts_metadata);
     }
+    tc.serialized_accounts = accounts_metadata;
 
     // Create SBPF VM
     const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
