@@ -214,11 +214,11 @@ pub fn createSysvarCache(
             .{},
         );
     }
-    sysvar_cache.epoch_schedule = try cloneSysvarData(allocator, ctx, sysvar.EpochSchedule.ID);
+    sysvar_cache.epoch_schedule = try cloneSysvarData(allocator, ctx, sig.core.EpochSchedule.ID);
     if (sysvar_cache.epoch_schedule == null) {
         sysvar_cache.epoch_schedule = try sig.bincode.writeAlloc(
             allocator,
-            sysvar.EpochSchedule.DEFAULT,
+            sig.core.EpochSchedule.DEFAULT,
             .{},
         );
     }
