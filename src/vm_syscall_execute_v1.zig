@@ -195,23 +195,26 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // Create Executable
     const version = SbpfVersion.v0;
 
-    const rodata = try allocator.dupe(u8, pb_vm.rodata.getSlice());
-    defer allocator.free(rodata);
+    const rodata_unaligned = try allocator.dupe(u8, pb_vm.rodata.getSlice());
+    defer allocator.free(rodata_unaligned);
 
-    if (rodata.len % @sizeOf(sig.vm.sbpf.Instruction) != 0)
-        return error.InvalidInput;
+    const align_offset = std.mem.alignForward(usize, rodata_unaligned.len, 16);
+    var rodata_aligned = try allocator.alloc(u8, align_offset);
+    defer allocator.free(rodata_aligned);
+    @memset(rodata_aligned, 0);
+    @memcpy(rodata_aligned[0..rodata_unaligned.len], rodata_unaligned);
 
     const executable: sig.vm.Executable = .{
         .instructions = std.mem.bytesAsSlice(
             sig.vm.sbpf.Instruction,
-            rodata,
+            rodata_aligned,
         ),
-        .bytes = rodata,
+        .bytes = rodata_aligned,
         .version = version,
         .ro_section = .{ .borrowed = .{
             .offset = memory.RODATA_START,
             .start = 0,
-            .end = rodata.len,
+            .end = rodata_aligned.len,
         } },
         .entry_pc = 0,
         .config = config,
@@ -257,7 +260,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     defer mm_regions.deinit(allocator);
 
     try mm_regions.appendSlice(allocator, &.{
-        memory.Region.init(.constant, rodata, memory.RODATA_START),
+        memory.Region.init(.constant, rodata_aligned, memory.RODATA_START),
         memory.Region.init(.mutable, stack, memory.STACK_START),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
@@ -353,7 +356,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .err_kind = error_kind,
         .heap = heap,
         .stack = stack,
-        .rodata = rodata,
+        .rodata = rodata_unaligned,
         .frame_count = vm.depth,
         .memory_map = vm.memory_map,
     });
