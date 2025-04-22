@@ -190,13 +190,18 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     try executor.pushInstruction(tc, instr_info);
 
     // Get Instruction Context
-    var ic = tc.instruction_stack.buffer[tc.instruction_stack.len - 1];
+    const ic = try tc.getCurrentInstructionContext();
 
     // Create Executable
     const version = SbpfVersion.v0;
-    const rodata = pb_vm.rodata.getSlice();
-    if (rodata.len % @sizeOf(sig.vm.sbpf.Instruction) != 0) return error.InvalidInput;
-    var executable: sig.vm.Executable = .{
+
+    const rodata = try allocator.dupe(u8, pb_vm.rodata.getSlice());
+    defer allocator.free(rodata);
+
+    if (rodata.len % @sizeOf(sig.vm.sbpf.Instruction) != 0)
+        return error.InvalidInput;
+
+    const executable: sig.vm.Executable = .{
         .instructions = std.mem.bytesAsSlice(
             sig.vm.sbpf.Instruction,
             rodata,
@@ -219,7 +224,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
         allocator,
-        &ic,
+        ic,
         !direct_mapping,
     );
     defer {
@@ -228,7 +233,9 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     }
     tc.serialized_accounts = accounts_metadata;
 
-    // Create SBPF VM
+    // Create Heap and Stack
+    if (pb_vm.heap_max > HEAP_MAX) return error.InvalidHeapSize;
+
     const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
 
     const heap = try allocator.alloc(u8, heap_max);
@@ -239,14 +246,18 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     defer allocator.free(stack);
     @memset(stack, 0);
 
-    std.mem.copyForwards(u8, heap, pb_syscall_invocation.heap_prefix.getSlice());
-    std.mem.copyForwards(u8, stack, pb_syscall_invocation.stack_prefix.getSlice());
+    const heap_prefix = pb_syscall_invocation.heap_prefix.getSlice();
+    const stack_prefix = pb_syscall_invocation.stack_prefix.getSlice();
 
+    std.mem.copyForwards(u8, heap, heap_prefix[0..@min(heap.len, heap_prefix.len)]);
+    std.mem.copyForwards(u8, stack, stack_prefix[0..@min(stack.len, stack_prefix.len)]);
+
+    // Create Memory Map
     var mm_regions: std.ArrayListUnmanaged(memory.Region) = .{};
     defer mm_regions.deinit(allocator);
 
     try mm_regions.appendSlice(allocator, &.{
-        memory.Region.init(.constant, pb_vm.rodata.getSlice(), memory.RODATA_START),
+        memory.Region.init(.constant, rodata, memory.RODATA_START),
         memory.Region.init(.mutable, stack, memory.STACK_START),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
@@ -279,18 +290,18 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         }
     }
 
-    const map = try memory.MemoryMap.init(
+    const memory_map = try memory.MemoryMap.init(
         allocator,
         mm_regions.items,
         version,
         config,
     );
-    defer map.deinit(allocator);
 
+    // Create VM
     var vm = try Vm.init(
         allocator,
         &executable,
-        map,
+        memory_map,
         &syscall_registry,
         stack.len,
         tc,

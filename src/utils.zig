@@ -430,6 +430,12 @@ pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.
         }
     }
 
+    std.mem.sort(pb.InputDataRegion, regions.items, {}, struct {
+        pub fn cmp(_: void, a: pb.InputDataRegion, b: pb.InputDataRegion) bool {
+            return a.offset < b.offset;
+        }
+    }.cmp);
+
     return regions;
 }
 
