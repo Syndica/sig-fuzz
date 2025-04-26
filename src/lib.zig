@@ -5,6 +5,7 @@ comptime {
     _ = @import("vm_validate.zig");
     _ = @import("shred_parse.zig");
     _ = @import("instr_execute_v1.zig");
+    _ = @import("vm_interp.zig");
 }
 
 pub const std_options: std.Options = .{

@@ -119,7 +119,7 @@ fn fdErrCode(err: anyerror) i32 {
     return switch (err) {
         error.NoProgram => -6,
         error.DivisionByZero => -18,
-        error.UnknownInstruction => -25,
+        error.UnsupportedInstruction => -25,
         error.InvalidSourceRegister => -26,
         error.InvalidDestinationRegister => -27,
         error.CannotWriteR10 => -27,

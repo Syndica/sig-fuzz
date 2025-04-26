@@ -8,6 +8,8 @@ const features = sig.runtime.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 
+const EbpfError = sig.vm.EbpfError;
+const SyscallError = sig.vm.SyscallError;
 const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const EpochContext = sig.runtime.transaction_context.EpochContext;
@@ -27,20 +29,20 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
     *TransactionContext,
 } {
     const ec = try allocator.create(EpochContext);
-    ec.* = sig.runtime.transaction_context.EpochContext{
+    ec.* = .{
         .allocator = allocator,
         .feature_set = try createFeatureSet(allocator, instr_ctx),
     };
 
     const sc = try allocator.create(SlotContext);
-    sc.* = sig.runtime.transaction_context.SlotContext{
+    sc.* = .{
         .allocator = allocator,
         .ec = ec,
         .sysvar_cache = try createSysvarCache(allocator, instr_ctx),
     };
 
     const tc = try allocator.create(TransactionContext);
-    tc.* = sig.runtime.transaction_context.TransactionContext{
+    tc.* = .{
         .allocator = allocator,
         .ec = ec,
         .sc = sc,
@@ -117,6 +119,8 @@ pub fn createTransactionContextAccounts(
     for (pb_accounts) |pb_account| {
         const account_data = try allocator.dupe(u8, pb_account.data.getSlice());
         errdefer allocator.free(account_data);
+
+        if (pb_account.owner.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         try accounts.append(
             TransactionContextAccount.init(
                 .{ .data = pb_account.address.getSlice()[0..Pubkey.SIZE].* },
@@ -404,4 +408,200 @@ pub fn printPbInstrEffects(effects: pb.InstrEffects) !void {
     std.fmt.format(writer, ",\n\treturn_data: {any}", .{effects.return_data.getSlice()}) catch return;
     writer.writeAll("\n}\n") catch return;
     std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
+    tc: *const TransactionContext,
+    err: i64,
+    err_kind: pb.ErrKind,
+    heap: []const u8,
+    stack: []const u8,
+    rodata: []const u8,
+    frame_count: u64,
+    memory_map: sig.vm.memory.MemoryMap,
+    registers: sig.vm.interpreter.RegisterMap = sig.vm.interpreter.RegisterMap.initFill(0),
+}) !pb.SyscallEffects {
+    var log = std.ArrayList(u8).init(allocator);
+    defer log.deinit();
+    if (params.tc.log_collector) |log_collector| {
+        for (log_collector.collect()) |msg| {
+            try log.appendSlice(msg);
+            try log.append('\n');
+        }
+        if (log.items.len > 0) _ = log.pop();
+    }
+
+    const input_data_regions = try extractInputDataRegions(
+        allocator,
+        params.memory_map,
+    );
+
+    return .{
+        .@"error" = params.err,
+        .error_kind = params.err_kind,
+        .cu_avail = params.tc.compute_meter,
+        .heap = try ManagedString.copy(params.heap, allocator),
+        .stack = try ManagedString.copy(params.stack, allocator),
+        .inputdata = .Empty, // Deprecated
+        .input_data_regions = input_data_regions,
+        .frame_count = params.frame_count,
+        .log = try ManagedString.copy(log.items, allocator),
+        .rodata = try ManagedString.copy(params.rodata, allocator),
+        .r0 = params.registers.get(.r0),
+        .r1 = params.registers.get(.r1),
+        .r2 = params.registers.get(.r2),
+        .r3 = params.registers.get(.r3),
+        .r4 = params.registers.get(.r4),
+        .r5 = params.registers.get(.r5),
+        .r6 = params.registers.get(.r6),
+        .r7 = params.registers.get(.r7),
+        .r8 = params.registers.get(.r8),
+        .r9 = params.registers.get(.r9),
+        .r10 = params.registers.get(.r10),
+        .pc = params.registers.get(.pc),
+    };
+}
+
+pub fn extractInputDataRegions(
+    allocator: std.mem.Allocator,
+    memory_map: sig.vm.memory.MemoryMap,
+) !std.ArrayList(pb.InputDataRegion) {
+    var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
+    errdefer regions.deinit();
+
+    const mm_regions: []const sig.vm.memory.Region = switch (memory_map) {
+        .aligned => |amm| amm.regions,
+        .unaligned => |umm| umm.regions,
+    };
+
+    for (mm_regions) |region| {
+        if (region.vm_addr_start >= sig.vm.memory.INPUT_START) {
+            try regions.append(.{
+                .offset = region.vm_addr_start - sig.vm.memory.INPUT_START,
+                .is_writable = region.host_memory == .mutable,
+                .content = try ManagedString.copy(region.constSlice(), allocator),
+            });
+        }
+    }
+
+    std.mem.sort(pb.InputDataRegion, regions.items, {}, struct {
+        pub fn cmp(_: void, a: pb.InputDataRegion, b: pb.InputDataRegion) bool {
+            return a.offset < b.offset;
+        }
+    }.cmp);
+
+    return regions;
+}
+
+pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { u8, pb.ErrKind, []const u8 } {
+    return switch (err) {
+        // zig fmt: off
+        EbpfError.ElfError                  => .{ 1, .EBPF, "ELF error" },
+        EbpfError.FunctionAlreadyRegistered => .{ 2, .EBPF, "function was already registered" },
+        EbpfError.CallDepthExceeded         => .{ 3, .EBPF, "exceeded max BPF to BPF call depth" },
+        EbpfError.ExitRootCallFrame         => .{ 4, .EBPF, "attempted to exit root call frame" },
+        EbpfError.DivisionByZero            => .{ 5, .EBPF, "divide by zero at BPF instruction" },
+        EbpfError.DivideOverflow            => .{ 6, .EBPF, "division overflow at BPF instruction" },
+        EbpfError.ExecutionOverrun          => .{ 7, .EBPF, "attempted to execute past the end of the text segment at BPF instruction" },
+        EbpfError.CallOutsideTextSegment    => .{ 8, .EBPF, "callx attempted to call outside of the text segment" },
+        EbpfError.ExceededMaxInstructions   => .{ 9, .EBPF, "exceeded CUs meter at BPF instruction" },
+        EbpfError.JitNotCompiled            => .{ 10, .EBPF, "program has not been JIT-compiled" },
+        EbpfError.InvalidVirtualAddress     => .{ 11, .EBPF, "invalid virtual address" },
+        EbpfError.InvalidMemoryRegion       => .{ 12, .EBPF, "Invalid memory region at index" },
+        EbpfError.AccessViolation           => .{ 13, .EBPF, "Access violation" },
+        EbpfError.StackAccessViolation      => .{ 13, .EBPF, "Access violation" },
+        EbpfError.InvalidInstruction        => .{ 15, .EBPF, "invalid BPF instruction" },
+        EbpfError.UnsupportedInstruction    => .{ 16, .EBPF, "unsupported BPF instruction" },
+        EbpfError.ExhaustedTextSegment      => .{ 17, .EBPF, "Compilation exhausted text segment at BPF instruction" },
+        EbpfError.LibcInvocationFailed      => .{ 18, .EBPF, "Libc calling returned error code" },
+        EbpfError.VerifierError             => .{ 19, .EBPF, "Verifier error" },
+        EbpfError.SyscallError              => return error.EbpfSyscallError,
+
+        SyscallError.InvalidString                      => .{ 1, .SYSCALL, "invalid utf-8 sequence" },
+        SyscallError.Abort                              => .{ 2, .SYSCALL, "SBF program panicked" },
+        SyscallError.Panic                              => .{ 3, .SYSCALL, "SBF program Panicked in..." },
+        SyscallError.InvokeContextBorrowFailed          => .{ 4, .SYSCALL, "Cannot borrow invoke context" },
+        SyscallError.MalformedSignerSeed                => .{ 5, .SYSCALL, "Malformed signer seed" },
+        SyscallError.BadSeeds                           => .{ 6, .SYSCALL, "Could not create program address with signer seeds" },
+        SyscallError.ProgramNotSupported                => .{ 7, .SYSCALL, "Program not supported by inner instructions" },
+        SyscallError.UnalignedPointer                   => .{ 8, .SYSCALL, "Unaligned pointer" },
+        SyscallError.TooManySigners                     => .{ 9, .SYSCALL, "Too many signers" },
+        SyscallError.InstructionTooLarge                => .{ 10, .SYSCALL, "Instruction passed to inner instruction is too large" },
+        SyscallError.TooManyAccounts                    => .{ 11, .SYSCALL, "Too many accounts passed to inner instruction" },
+        SyscallError.CopyOverlapping                    => .{ 12, .SYSCALL, "Overlapping copy" },
+        SyscallError.ReturnDataTooLarge                 => .{ 13, .SYSCALL, "Return data too large" },
+        SyscallError.TooManySlices                      => .{ 14, .SYSCALL, "Hashing too many sequences" },
+        SyscallError.InvalidLength                      => .{ 15, .SYSCALL, "InvalidLength" },
+        SyscallError.MaxInstructionDataLenExceeded      => .{ 16, .SYSCALL, "Invoked an instruction with data that is too large" },
+        SyscallError.MaxInstructionAccountsExceeded     => .{ 17, .SYSCALL, "Invoked an instruction with too many accounts" },
+        SyscallError.MaxInstructionAccountInfosExceeded => .{ 18, .SYSCALL, "Invoked an instruction with too many account info's" },
+        SyscallError.InvalidAttribute                   => .{ 19, .SYSCALL, "InvalidAttribute" },
+        SyscallError.InvalidPointer                     => .{ 20, .SYSCALL, "Invalid pointer" },
+        SyscallError.ArithmeticOverflow                 => .{ 21, .SYSCALL, "Arithmetic overflow" },
+
+        InstructionError.GenericError                           => .{ 1, .INSTRUCTION, "generic instruction error" },
+        InstructionError.InvalidArgument                        => .{ 2, .INSTRUCTION, "invalid program argument" },
+        InstructionError.InvalidInstructionData                 => .{ 3, .INSTRUCTION, "invalid instruction data" },
+        InstructionError.InvalidAccountData                     => .{ 4, .INSTRUCTION, "invalid account data for instruction" },
+        InstructionError.AccountDataTooSmall                    => .{ 5, .INSTRUCTION, "account data too small for instruction" },
+        InstructionError.InsufficientFunds                      => .{ 6, .INSTRUCTION, "insufficient funds for instruction" },
+        InstructionError.IncorrectProgramId                     => .{ 7, .INSTRUCTION, "incorrect program id for instruction" },
+        InstructionError.MissingRequiredSignature               => .{ 8, .INSTRUCTION, "missing required signature for instruction" },
+        InstructionError.AccountAlreadyInitialized              => .{ 9, .INSTRUCTION, "instruction requires an uninitialized account" },
+        InstructionError.UninitializedAccount                   => .{ 10, .INSTRUCTION, "instruction requires an initialized account" },
+        InstructionError.UnbalancedInstruction                  => .{ 11, .INSTRUCTION, "sum of account balances before and after instruction do not match" },
+        InstructionError.ModifiedProgramId                      => .{ 12, .INSTRUCTION, "instruction illegally modified the program id of an account" },
+        InstructionError.ExternalAccountLamportSpend            => .{ 13, .INSTRUCTION, "instruction spent from the balance of an account it does not own" },
+        InstructionError.ExternalAccountDataModified            => .{ 14, .INSTRUCTION, "instruction modified data of an account it does not own" },
+        InstructionError.ReadonlyLamportChange                  => .{ 15, .INSTRUCTION, "instruction changed the balance of a read-only account" },
+        InstructionError.ReadonlyDataModified                   => .{ 16, .INSTRUCTION, "instruction modified data of a read-only account" },
+        InstructionError.DuplicateAccountIndex                  => .{ 17, .INSTRUCTION, "instruction contains duplicate accounts" },
+        InstructionError.ExecutableModified                     => .{ 18, .INSTRUCTION, "instruction changed executable bit of an account" },
+        InstructionError.RentEpochModified                      => .{ 19, .INSTRUCTION, "instruction modified rent epoch of an account" },
+        InstructionError.NotEnoughAccountKeys                   => .{ 20, .INSTRUCTION, "insufficient account keys for instruction" },
+        InstructionError.AccountDataSizeChanged                 => .{ 21, .INSTRUCTION, "program other than the account's owner changed the size of the account data" },
+        InstructionError.AccountNotExecutable                   => .{ 22, .INSTRUCTION, "instruction expected an executable account" },
+        InstructionError.AccountBorrowFailed                    => .{ 23, .INSTRUCTION, "instruction tries to borrow reference for an account which is already borrowed" },
+        InstructionError.AccountBorrowOutstanding               => .{ 24, .INSTRUCTION, "instruction left account with an outstanding borrowed reference" },
+        InstructionError.DuplicateAccountOutOfSync              => .{ 25, .INSTRUCTION, "instruction modifications of multiply-passed account differ" },
+        InstructionError.Custom                                 => .{ 26, .INSTRUCTION, "custom program error" },
+        InstructionError.InvalidError                           => .{ 27, .INSTRUCTION, "program returned invalid error code" },
+        InstructionError.ExecutableDataModified                 => .{ 28, .INSTRUCTION, "instruction changed executable accounts data" },
+        InstructionError.ExecutableLamportChange                => .{ 29, .INSTRUCTION, "instruction changed the balance of an executable account" },
+        InstructionError.ExecutableAccountNotRentExempt         => .{ 30, .INSTRUCTION, "executable accounts must be rent exempt" },
+        InstructionError.UnsupportedProgramId                   => .{ 31, .INSTRUCTION, "Unsupported program id" },
+        InstructionError.CallDepth                              => .{ 32, .INSTRUCTION, "Cross-program invocation call depth too deep" },
+        InstructionError.MissingAccount                         => .{ 33, .INSTRUCTION, "An account required by the instruction is missing" },
+        InstructionError.ReentrancyNotAllowed                   => .{ 34, .INSTRUCTION, "Cross-program invocation reentrancy not allowed for this instruction" },
+        InstructionError.MaxSeedLengthExceeded                  => .{ 35, .INSTRUCTION, "Length of the seed is too long for address generation" },
+        InstructionError.InvalidSeeds                           => .{ 36, .INSTRUCTION, "Provided seeds do not result in a valid address" },
+        InstructionError.InvalidRealloc                         => .{ 37, .INSTRUCTION, "Failed to reallocate account data" },
+        InstructionError.ComputationalBudgetExceeded            => .{ 38, .INSTRUCTION, "Computational budget exceeded" },
+        InstructionError.PrivilegeEscalation                    => .{ 39, .INSTRUCTION, "Cross-program invocation with unauthorized signer or writable account" },
+        InstructionError.ProgramEnvironmentSetupFailure         => .{ 40, .INSTRUCTION, "Failed to create program execution environment" },
+        InstructionError.ProgramFailedToComplete                => .{ 41, .INSTRUCTION, "Program failed to complete" },
+        InstructionError.ProgramFailedToCompile                 => .{ 42, .INSTRUCTION, "Program failed to compile" },
+        InstructionError.Immutable                              => .{ 43, .INSTRUCTION, "Account is immutable" },
+        InstructionError.IncorrectAuthority                     => .{ 44, .INSTRUCTION, "Incorrect authority provided" },
+        InstructionError.BorshIoError                           => .{ 45, .INSTRUCTION, "Failed to serialize or deserialize account data" },
+        InstructionError.AccountNotRentExempt                   => .{ 46, .INSTRUCTION, "An account does not have enough lamports to be rent-exempt" },
+        InstructionError.InvalidAccountOwner                    => .{ 47, .INSTRUCTION, "Invalid account owner" },
+        InstructionError.ProgramArithmeticOverflow              => .{ 48, .INSTRUCTION, "Program arithmetic overflowed" },
+        InstructionError.UnsupportedSysvar                      => .{ 49, .INSTRUCTION, "Unsupported sysvar" },
+        InstructionError.IllegalOwner                           => .{ 50, .INSTRUCTION, "Provided owner is not allowed" },
+        InstructionError.MaxAccountsDataAllocationsExceeded     => .{ 51, .INSTRUCTION, "Accounts data allocations exceeded the maximum allowed per transaction" },
+        InstructionError.MaxAccountsExceeded                    => .{ 52, .INSTRUCTION, "Max accounts exceeded" },
+        InstructionError.MaxInstructionTraceLengthExceeded      => .{ 53, .INSTRUCTION, "Max instruction trace length exceeded" },
+        InstructionError.BuiltinProgramsMustConsumeComputeUnits => .{ 54, .INSTRUCTION, "Builtin programs must consume compute units" },
+        // zig fmt: on
+        else => {
+            std.debug.print("Sig error: {s}\n", .{@errorName(err)});
+            return error.SigError;
+        },
+    };
+}
+
+pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
+    const size = @min(dst.len, prefix.len);
+    @memcpy(dst[0..size], prefix[0..size]);
 }
