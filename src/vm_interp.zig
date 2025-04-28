@@ -25,7 +25,6 @@ const memory = svm.memory;
 const HEAP_MAX = 256 * 1024;
 const STACK_SIZE = 4_096 * 64;
 
-// NOTE: This totally doesn't work, just for fun and testing!
 export fn sol_compat_vm_interp_v1(
     out_ptr: [*]u8,
     out_size: *u64,
@@ -132,10 +131,10 @@ fn executeVmTest(
 
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
-        allocator,
-        &ic,
-        !direct_mapping,
-    );
+            allocator,
+            &ic,
+            !direct_mapping,
+        );
     defer {
         allocator.free(parameter_bytes);
         allocator.free(regions);
@@ -307,6 +306,7 @@ fn executeVmTest(
     });
 }
 
+/// [agave] https://github.com/firedancer-io/solfuzz-agave/blob/agave-v2.1.14/src/utils/vm/err_map.rs#L7-L31
 fn convertError(err: anyerror) i32 {
     return switch (err) {
         // zig fmt: off
