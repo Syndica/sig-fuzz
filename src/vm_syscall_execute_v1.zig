@@ -194,27 +194,28 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     // Create Executable
     const version = SbpfVersion.v0;
+    
+    const rodata_buffer = try allocator.dupe(u8, pb_vm.rodata.getSlice());
+    defer allocator.free(rodata_buffer);
 
-    const rodata_unaligned = try allocator.dupe(u8, pb_vm.rodata.getSlice());
-    defer allocator.free(rodata_unaligned);
-
-    const align_offset = std.mem.alignForward(usize, rodata_unaligned.len, 16);
-    var rodata_aligned = try allocator.alloc(u8, align_offset);
-    defer allocator.free(rodata_aligned);
-    @memset(rodata_aligned, 0);
-    @memcpy(rodata_aligned[0..rodata_unaligned.len], rodata_unaligned);
+    // align/zero-pad the rodata to 16
+    const aligned_offset = std.mem.alignForward(usize, rodata_buffer.len, 16);
+    const rodata = try allocator.alloc(u8, aligned_offset);
+    defer allocator.free(rodata);
+    @memcpy(rodata[0..rodata_buffer.len], rodata_buffer);
+    @memset(rodata[rodata_buffer.len..],  0);
 
     const executable: sig.vm.Executable = .{
         .instructions = std.mem.bytesAsSlice(
             sig.vm.sbpf.Instruction,
-            rodata_aligned,
+            rodata,
         ),
-        .bytes = rodata_aligned,
+        .bytes = rodata,
         .version = version,
         .ro_section = .{ .borrowed = .{
             .offset = memory.RODATA_START,
             .start = 0,
-            .end = rodata_aligned.len,
+            .end = rodata.len,
         } },
         .entry_pc = 0,
         .config = config,
@@ -249,19 +250,18 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     defer allocator.free(stack);
     @memset(stack, 0);
 
-    const heap_prefix = pb_syscall_invocation.heap_prefix.getSlice();
-    const stack_prefix = pb_syscall_invocation.stack_prefix.getSlice();
-
-    std.mem.copyForwards(u8, heap, heap_prefix[0..@min(heap.len, heap_prefix.len)]);
-    std.mem.copyForwards(u8, stack, stack_prefix[0..@min(stack.len, stack_prefix.len)]);
-
     // Create Memory Map
     var mm_regions: std.ArrayListUnmanaged(memory.Region) = .{};
     defer mm_regions.deinit(allocator);
 
     try mm_regions.appendSlice(allocator, &.{
-        memory.Region.init(.constant, rodata_aligned, memory.RODATA_START),
-        memory.Region.init(.mutable, stack, memory.STACK_START),
+        memory.Region.init(.constant, rodata, memory.RODATA_START),
+        memory.Region.initGapped(
+            .mutable,
+            stack,
+            memory.STACK_START,
+            if (config.enable_stack_frame_gaps) config.stack_frame_size else 0,
+        ),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
     try mm_regions.appendSlice(allocator, regions);
@@ -323,6 +323,11 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     vm.registers.set(.r9, pb_vm.r9);
     vm.registers.set(.r10, pb_vm.r10);
 
+    const heap_prefix = pb_syscall_invocation.heap_prefix.getSlice();
+    const stack_prefix = pb_syscall_invocation.stack_prefix.getSlice();
+    std.mem.copyForwards(u8, heap, heap_prefix[0..@min(heap.len, heap_prefix.len)]);
+    std.mem.copyForwards(u8, stack, stack_prefix[0..@min(stack.len, stack_prefix.len)]);
+
     // Lookup syscall
     const syscall_name = pb_syscall_ctx.syscall_invocation.?.function_name.getSlice();
     const syscall_entry = syscall_registry.functions.lookupName(syscall_name) orelse {
@@ -356,7 +361,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .err_kind = error_kind,
         .heap = heap,
         .stack = stack,
-        .rodata = rodata_unaligned,
+        .rodata = rodata_buffer,
         .frame_count = vm.depth,
         .memory_map = vm.memory_map,
     });
