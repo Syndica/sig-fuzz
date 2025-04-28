@@ -121,6 +121,7 @@ pub fn createTransactionContextAccounts(
         errdefer allocator.free(account_data);
 
         if (pb_account.owner.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
+        if (pb_account.address.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         try accounts.append(
             TransactionContextAccount.init(
                 .{ .data = pb_account.address.getSlice()[0..Pubkey.SIZE].* },
