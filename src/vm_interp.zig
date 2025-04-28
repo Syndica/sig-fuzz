@@ -250,6 +250,11 @@ fn executeVmTest(
     );
     defer vm.deinit();
 
+    // r1, r10, pc are initialized by Vm.init, modifying them will most like break execution.
+    // In vm_syscalls we allow override them (especially r1) because that simulates the fact
+    // that a program partially executed before reaching the syscall.
+    // Here we want to test what happens when the program starts from the beginning.
+    // [agave] https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_interp.rs#L357-L362
     vm.registers.set(.r0, vm_context.r0);
     // vm.registers.set(.r1, vm_context.r1);
     vm.registers.set(.r2, vm_context.r2);
