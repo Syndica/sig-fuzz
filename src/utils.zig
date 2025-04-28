@@ -8,6 +8,8 @@ const features = sig.runtime.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 
+const EbpfError = sig.vm.EbpfError;
+const SyscallError = sig.vm.SyscallError;
 const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const EpochContext = sig.runtime.transaction_context.EpochContext;
@@ -27,20 +29,20 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
     *TransactionContext,
 } {
     const ec = try allocator.create(EpochContext);
-    ec.* = sig.runtime.transaction_context.EpochContext{
+    ec.* = .{
         .allocator = allocator,
         .feature_set = try createFeatureSet(allocator, instr_ctx),
     };
 
     const sc = try allocator.create(SlotContext);
-    sc.* = sig.runtime.transaction_context.SlotContext{
+    sc.* = .{
         .allocator = allocator,
         .ec = ec,
         .sysvar_cache = try createSysvarCache(allocator, instr_ctx),
     };
 
     const tc = try allocator.create(TransactionContext);
-    tc.* = sig.runtime.transaction_context.TransactionContext{
+    tc.* = .{
         .allocator = allocator,
         .ec = ec,
         .sc = sc,
@@ -117,6 +119,8 @@ pub fn createTransactionContextAccounts(
     for (pb_accounts) |pb_account| {
         const account_data = try allocator.dupe(u8, pb_account.data.getSlice());
         errdefer allocator.free(account_data);
+
+        if (pb_account.owner.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         try accounts.append(
             TransactionContextAccount.init(
                 .{ .data = pb_account.address.getSlice()[0..Pubkey.SIZE].* },
@@ -404,4 +408,92 @@ pub fn printPbInstrEffects(effects: pb.InstrEffects) !void {
     std.fmt.format(writer, ",\n\treturn_data: {any}", .{effects.return_data.getSlice()}) catch return;
     writer.writeAll("\n}\n") catch return;
     std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
+    tc: *const TransactionContext,
+    err: i64,
+    err_kind: pb.ErrKind,
+    heap: []const u8,
+    stack: []const u8,
+    rodata: []const u8,
+    frame_count: u64,
+    memory_map: sig.vm.memory.MemoryMap,
+    registers: sig.vm.interpreter.RegisterMap = sig.vm.interpreter.RegisterMap.initFill(0),
+}) !pb.SyscallEffects {
+    var log = std.ArrayList(u8).init(allocator);
+    defer log.deinit();
+    if (params.tc.log_collector) |log_collector| {
+        for (log_collector.collect()) |msg| {
+            try log.appendSlice(msg);
+            try log.append('\n');
+        }
+        if (log.items.len > 0) _ = log.pop();
+    }
+
+    const input_data_regions = try extractInputDataRegions(
+        allocator,
+        params.memory_map,
+    );
+
+    return .{
+        .@"error" = params.err,
+        .error_kind = params.err_kind,
+        .cu_avail = params.tc.compute_meter,
+        .heap = try ManagedString.copy(params.heap, allocator),
+        .stack = try ManagedString.copy(params.stack, allocator),
+        .inputdata = .Empty, // Deprecated
+        .input_data_regions = input_data_regions,
+        .frame_count = params.frame_count,
+        .log = try ManagedString.copy(log.items, allocator),
+        .rodata = try ManagedString.copy(params.rodata, allocator),
+        .r0 = params.registers.get(.r0),
+        .r1 = params.registers.get(.r1),
+        .r2 = params.registers.get(.r2),
+        .r3 = params.registers.get(.r3),
+        .r4 = params.registers.get(.r4),
+        .r5 = params.registers.get(.r5),
+        .r6 = params.registers.get(.r6),
+        .r7 = params.registers.get(.r7),
+        .r8 = params.registers.get(.r8),
+        .r9 = params.registers.get(.r9),
+        .r10 = params.registers.get(.r10),
+        .pc = params.registers.get(.pc),
+    };
+}
+
+pub fn extractInputDataRegions(
+    allocator: std.mem.Allocator,
+    memory_map: sig.vm.memory.MemoryMap,
+) !std.ArrayList(pb.InputDataRegion) {
+    var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
+    errdefer regions.deinit();
+
+    const mm_regions: []const sig.vm.memory.Region = switch (memory_map) {
+        .aligned => |amm| amm.regions,
+        .unaligned => |umm| umm.regions,
+    };
+
+    for (mm_regions) |region| {
+        if (region.vm_addr_start >= sig.vm.memory.INPUT_START) {
+            try regions.append(.{
+                .offset = region.vm_addr_start - sig.vm.memory.INPUT_START,
+                .is_writable = region.host_memory == .mutable,
+                .content = try ManagedString.copy(region.constSlice(), allocator),
+            });
+        }
+    }
+
+    std.mem.sort(pb.InputDataRegion, regions.items, {}, struct {
+        pub fn cmp(_: void, a: pb.InputDataRegion, b: pb.InputDataRegion) bool {
+            return a.offset < b.offset;
+        }
+    }.cmp);
+
+    return regions;
+}
+
+pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
+    const size = @min(dst.len, prefix.len);
+    @memcpy(dst[0..size], prefix[0..size]);
 }
