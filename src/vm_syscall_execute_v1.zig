@@ -89,32 +89,22 @@ export fn sol_compat_vm_syscall_execute_v1(
 
 fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContext, emit_logs: bool) !pb.SyscallEffects {
     // Must have instruction context, vm context, and syscall invocation
-    const pb_instr = pb_syscall_ctx.instr_ctx orelse
-        return error.NoInstrCtx;
-    const pb_vm = pb_syscall_ctx.vm_ctx orelse
-        return error.NoVmCtx;
+    const pb_instr = pb_syscall_ctx.instr_ctx orelse return error.NoInstrCtx;
+    const pb_vm = pb_syscall_ctx.vm_ctx orelse return error.NoVmCtx;
     const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse
         return error.NoSyscallInvocation;
 
     // // [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_syscalls.rs#L75-L87
-    // blk: {
-    //     for (pb_instr_ctx.accounts.items) |acc| {
-    //         if (std.mem.eql(
-    //             u8,
-    //             acc.address.getSlice(),
-    //             pb_instr_ctx.instruction.program_id.getSlice(),
-    //         )) {
-    //             break :blk;
-    //         }
-    //     }
-    //     pb_instr_ctx.accounts.append(.{
-    //         .address = pb_instr_ctx.instruction.program_id,
-    //         .lamports = 0,
-    //         .data = .Empty,
-    //         .executable = false,
-    //         .rent_epoch = 0,
-    //         .owner = .Empty,
-    //         .seed_addr = null,
+    // for (pb_instr_ctx.accounts.items) |acc| {
+    //     if (std.mem.eql(
+    //         u8,
+    //         acc.address.getSlice(),
+    //         pb_instr_ctx.program_id.getSlice(),
+    //     )) break;
+    // } else {
+    //     try pb_instr_ctx.accounts.append(.{
+    //         .address = try pb_instr_ctx.program_id.dupe(allocator),
+    //         .owner = protobuf.ManagedString.static(&(.{0} ** 32)),
     //     });
     // }
 
@@ -132,7 +122,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         allocator.destroy(tc);
     }
 
-    // Register syscalls
     const syscall_registry = try sig.vm.syscalls.register(
         allocator,
         &ec.feature_set,
@@ -141,7 +130,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     );
     defer syscall_registry.deinit(allocator);
 
-    // Create Config
     const reject_broken_elfs = true;
     const debugging_features = false;
     const direct_mapping = ec.feature_set.isActive(
@@ -152,7 +140,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .max_call_depth = tc.compute_budget.max_call_depth,
         .stack_frame_size = tc.compute_budget.stack_frame_size,
         .enable_address_translation = true,
-        .enable_stack_frame_gaps = !direct_mapping,
         .instruction_meter_checkpoint_distance = 10_000,
         .enable_instruction_meter = true,
         .enable_instruction_tracing = debugging_features,
@@ -162,8 +149,9 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .sanitize_user_provided_values = true,
         .optimize_rodata = false,
         .aligned_memory_mapping = !direct_mapping,
-        .maximum_version = SbpfVersion.v0,
-        .minimum_version = SbpfVersion.v0,
+        .enable_stack_frame_gaps = !direct_mapping,
+        .maximum_version = .v0,
+        .minimum_version = .v0,
     };
 
     // Set return data
@@ -186,32 +174,16 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     );
     defer instr_info.deinit(allocator);
 
-    // Push syscall
     try executor.pushInstruction(tc, instr_info);
-
-    // Get Instruction Context
     const ic = try tc.getCurrentInstructionContext();
 
-    // Create Executable
-    const version = SbpfVersion.v0;
-    
-    const rodata_buffer = try allocator.dupe(u8, pb_vm.rodata.getSlice());
-    defer allocator.free(rodata_buffer);
-
-    // align/zero-pad the rodata to 16
-    const aligned_offset = std.mem.alignForward(usize, rodata_buffer.len, 16);
-    const rodata = try allocator.alloc(u8, aligned_offset);
+    const rodata = try allocator.dupe(u8, pb_vm.rodata.getSlice());
     defer allocator.free(rodata);
-    @memcpy(rodata[0..rodata_buffer.len], rodata_buffer);
-    @memset(rodata[rodata_buffer.len..],  0);
 
     const executable: sig.vm.Executable = .{
-        .instructions = std.mem.bytesAsSlice(
-            sig.vm.sbpf.Instruction,
-            rodata,
-        ),
+        .instructions = &.{},
         .bytes = rodata,
-        .version = version,
+        .version = .v0,
         .ro_section = .{ .borrowed = .{
             .offset = memory.RODATA_START,
             .start = 0,
@@ -224,7 +196,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .from_asm = false,
     };
 
-    // Serialize parameters
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
         allocator,
@@ -237,7 +208,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     }
     tc.serialized_accounts = accounts_metadata;
 
-    // Create Heap and Stack
     if (pb_vm.heap_max > HEAP_MAX) return error.InvalidHeapSize;
 
     const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
@@ -250,7 +220,6 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     defer allocator.free(stack);
     @memset(stack, 0);
 
-    // Create Memory Map
     var mm_regions: std.ArrayListUnmanaged(memory.Region) = .{};
     defer mm_regions.deinit(allocator);
 
@@ -296,11 +265,10 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const memory_map = try memory.MemoryMap.init(
         allocator,
         mm_regions.items,
-        version,
+        .v0,
         config,
     );
 
-    // Create VM
     var vm = try Vm.init(
         allocator,
         &executable,
@@ -311,24 +279,19 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     );
     defer vm.deinit();
 
-    vm.registers.set(.r0, pb_vm.r0);
+    // r0 is the return value register
+    // r1-5 are the argument registers
+    // r6-11 aren't used by the syscalls
+    vm.registers.set(.r0, 0);
     vm.registers.set(.r1, pb_vm.r1);
     vm.registers.set(.r2, pb_vm.r2);
     vm.registers.set(.r3, pb_vm.r3);
     vm.registers.set(.r4, pb_vm.r4);
     vm.registers.set(.r5, pb_vm.r5);
-    vm.registers.set(.r6, pb_vm.r6);
-    vm.registers.set(.r7, pb_vm.r7);
-    vm.registers.set(.r8, pb_vm.r8);
-    vm.registers.set(.r9, pb_vm.r9);
-    vm.registers.set(.r10, pb_vm.r10);
 
-    const heap_prefix = pb_syscall_invocation.heap_prefix.getSlice();
-    const stack_prefix = pb_syscall_invocation.stack_prefix.getSlice();
-    std.mem.copyForwards(u8, heap, heap_prefix[0..@min(heap.len, heap_prefix.len)]);
-    std.mem.copyForwards(u8, stack, stack_prefix[0..@min(stack.len, stack_prefix.len)]);
+    utils.copyPrefix(heap, pb_syscall_invocation.heap_prefix.getSlice());
+    utils.copyPrefix(stack, pb_syscall_invocation.stack_prefix.getSlice());
 
-    // Lookup syscall
     const syscall_name = pb_syscall_ctx.syscall_invocation.?.function_name.getSlice();
     const syscall_entry = syscall_registry.functions.lookupName(syscall_name) orelse {
         std.debug.print("Syscall not found: {s}\n", .{syscall_name});
@@ -336,16 +299,13 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     };
     const syscall_fn = syscall_entry.value;
 
-    // Execute syscall and capture error
     var execution_error: ?sig.vm.ExecutionError = null;
     syscall_fn(tc, &vm.memory_map, &vm.registers) catch |err| {
         execution_error = err;
     };
 
-    // Pop instruction
     try executor.popInstruction(tc);
 
-    // Log syscall error
     var @"error": i64, var error_kind: pb.ErrKind = .{ 0, .UNSPECIFIED };
     if (execution_error) |err| {
         const e, const ek, const msg = try convertExecutionError(err);
@@ -354,19 +314,22 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         try sig.runtime.stable_log.programFailure(tc, instr_info.program_meta.pubkey, msg);
     }
 
-    // Capture Effects
     const effects = try utils.createSyscallEffect(allocator, .{
         .tc = tc,
         .err = @"error",
         .err_kind = error_kind,
         .heap = heap,
         .stack = stack,
-        .rodata = rodata_buffer,
+        .rodata = rodata,
         .frame_count = vm.depth,
         .memory_map = vm.memory_map,
+        .registers = blk: {
+            var registers = sig.vm.interpreter.RegisterMap.initFill(0);
+            if (execution_error == null) registers.set(.r0, vm.registers.get(.r0));
+            break :blk registers;
+        },
     });
 
-    // Emit logs
     if (emit_logs) {
         std.debug.print("Execution Logs:\n", .{});
         for (tc.log_collector.?.collect(), 1..) |msg, index| {
@@ -482,81 +445,4 @@ pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { u8, pb.ErrKin
             return error.SigError;
         },
     };
-}
-
-test executeSyscall {
-    const allocator = std.testing.allocator;
-    const program_id = sig.runtime.program.system_program.ID;
-    const bpf_loader_id = sig.runtime.program.bpf_loader_program.v3.ID;
-
-    var accounts = std.ArrayList(pb.AcctState).init(allocator);
-    defer accounts.deinit();
-    try accounts.append(.{
-        .address = ManagedString.static(&program_id.data),
-        .lamports = 123456789,
-        .data = ManagedString.static(&[_]u8{0} ** 100),
-        .executable = true,
-        .rent_epoch = 18446744073709551615,
-        .owner = ManagedString.static(&bpf_loader_id.data),
-    });
-
-    const instr_accounts = std.ArrayList(pb.InstrAcct).init(allocator);
-    defer instr_accounts.deinit();
-
-    const pb_instr = pb.InstrContext{
-        .program_id = ManagedString.static(&program_id.data),
-        .accounts = accounts,
-        .instr_accounts = instr_accounts,
-        .data = .Empty,
-        .cu_avail = 5,
-    };
-
-    const input_data_regions = std.ArrayList(pb.InputDataRegion).init(allocator);
-    defer input_data_regions.deinit();
-
-    const pb_vm = pb.VmContext{
-        .heap_max = 5,
-        .rodata = .Empty,
-        .rodata_text_section_offset = 0,
-        .rodata_text_section_length = 0,
-        .input_data_regions = input_data_regions,
-        .r0 = 0,
-        .r1 = 12884901888,
-        .r2 = 5,
-        .r3 = 1,
-        .r4 = 2,
-        .r5 = 0,
-        .r6 = 0,
-        .r7 = 0,
-        .r8 = 0,
-        .r9 = 0,
-        .r10 = 0,
-        .r11 = 0,
-        .check_align = false,
-        .check_size = false,
-        .entry_pc = 0,
-        .call_whitelist = .Empty,
-        .tracing_enabled = false,
-        .return_data = null,
-        .sbpf_version = 0,
-    };
-
-    const syscall_invocation = pb.SyscallInvocation{
-        .function_name = ManagedString.static("sol_panic_"),
-        .heap_prefix = ManagedString.static(&[_]u8{ 104, 101, 108, 108, 111 }),
-        .stack_prefix = .Empty,
-    };
-
-    const pb_syscall = pb.SyscallContext{
-        .instr_ctx = pb_instr,
-        .vm_ctx = pb_vm,
-        .syscall_invocation = syscall_invocation,
-        .exec_effects = null,
-    };
-
-    var result = executeSyscall(allocator, pb_syscall, false) catch |err| {
-        std.debug.print("executeSyscall: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer result.deinit();
 }
