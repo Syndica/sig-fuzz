@@ -117,7 +117,3 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
         result,
     );
 }
-
-test executeInstruction {
-    // TODO: Implement
-}
