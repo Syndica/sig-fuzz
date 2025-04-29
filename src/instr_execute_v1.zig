@@ -72,7 +72,6 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
     const ec, const sc, const tc = try utils.createExecutionContexts(
         allocator,
         pb_instr_ctx,
-        emit_logs,
     );
     defer {
         ec.deinit();
@@ -105,9 +104,9 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
         }
     };
 
-    if (tc.log_collector) |log_collector| {
+    if (emit_logs) {
         std.debug.print("Execution Logs:\n", .{});
-        for (log_collector.collect(), 1..) |msg, index| {
+        for (tc.log_collector.?.collect(), 1..) |msg, index| {
             std.debug.print("    {}: {s}\n", .{ index, msg });
         }
     }

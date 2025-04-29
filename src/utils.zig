@@ -7,6 +7,7 @@ const ManagedString = @import("protobuf").ManagedString;
 const features = sig.runtime.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
+const memory = sig.vm.memory;
 
 const EbpfError = sig.vm.EbpfError;
 const SyscallError = sig.vm.SyscallError;
@@ -23,7 +24,7 @@ const intFromInstructionError = sig.core.instruction.intFromInstructionError;
 
 const EMIT_LOGS = false;
 
-pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.InstrContext, emit_logs: bool) !struct {
+pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.InstrContext) !struct {
     *EpochContext,
     *SlotContext,
     *TransactionContext,
@@ -58,7 +59,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .compute_meter = instr_ctx.cu_avail,
         .compute_budget = sig.runtime.ComputeBudget.default(instr_ctx.cu_avail),
         .custom_error = null,
-        .log_collector = if (emit_logs) sig.runtime.LogCollector.init(null) else null,
+        .log_collector = sig.runtime.LogCollector.default(),
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
@@ -355,62 +356,6 @@ fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext)
     return accounts;
 }
 
-pub fn printPbInstrContext(ctx: pb.InstrContext) !void {
-    var buffer = [_]u8{0} ** (1024 * 1024);
-    var fbs = std.io.fixedBufferStream(&buffer);
-    var writer = fbs.writer();
-    writer.writeAll("InstrContext {") catch return;
-    std.fmt.format(writer, "\n\tprogram_id: {any}", .{ctx.program_id.getSlice()}) catch return;
-    writer.writeAll(",\n\taccounts: [") catch return;
-    for (ctx.accounts.items) |acc| {
-        writer.writeAll("\n\t\tAcctState {") catch return;
-        std.fmt.format(writer, "\n\t\t\taddress: {any}", .{acc.address.getSlice()}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tlamports: {d}", .{acc.lamports}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tdata: {any}", .{acc.data.getSlice()}) catch return;
-        std.fmt.format(writer, ",\n\t\t\texecutable: {}", .{acc.executable}) catch return;
-        std.fmt.format(writer, ",\n\t\t\trent_epoch: {}", .{acc.rent_epoch}) catch return;
-        std.fmt.format(writer, ",\n\t\t\towner: {any}", .{acc.owner.getSlice()}) catch return;
-        writer.writeAll("\n\t\t},\n") catch return;
-    }
-    writer.writeAll("\t],\n\tinstr_accounts: [") catch return;
-    for (ctx.instr_accounts.items) |acc| {
-        writer.writeAll("\n\t\tInstrAcct {") catch return;
-        std.fmt.format(writer, "\n\t\t\tindex: {}", .{acc.index}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tis_signer: {}", .{acc.is_signer}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tis_writable: {}", .{acc.is_writable}) catch return;
-        writer.writeAll("\n\t\t},\n") catch return;
-    }
-    std.fmt.format(writer, "\t],\n\tdata: {any}", .{ctx.data.getSlice()}) catch return;
-    std.fmt.format(writer, ",\n\tcu_avail: {d}", .{ctx.cu_avail}) catch return;
-    writer.writeAll(",\n}\n") catch return;
-    std.debug.print("{s}", .{writer.context.getWritten()});
-}
-
-pub fn printPbInstrEffects(effects: pb.InstrEffects) !void {
-    var buffer = [_]u8{0} ** (1024 * 1024);
-    var fbs = std.io.fixedBufferStream(&buffer);
-    var writer = fbs.writer();
-    writer.writeAll("InstrEffects {") catch return;
-    std.fmt.format(writer, "\n\tresult: {d}", .{effects.result}) catch return;
-    std.fmt.format(writer, ",\n\tcustom_err: {d}", .{effects.custom_err}) catch return;
-    writer.writeAll(",\n\tmodified_accounts: [") catch return;
-    for (effects.modified_accounts.items) |acc| {
-        writer.writeAll("\n\t\tAcctState {") catch return;
-        std.fmt.format(writer, "\n\t\t\taddress: {any}", .{acc.address.getSlice()}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tlamports: {d}", .{acc.lamports}) catch return;
-        std.fmt.format(writer, ",\n\t\t\tdata: {any}", .{acc.data.getSlice()}) catch return;
-        std.fmt.format(writer, ",\n\t\t\texecutable: {}", .{acc.executable}) catch return;
-        std.fmt.format(writer, ",\n\t\t\trent_epoch: {}", .{acc.rent_epoch}) catch return;
-        std.fmt.format(writer, ",\n\t\t\towner: {any}", .{acc.owner.getSlice()}) catch return;
-        writer.writeAll("\n\t\t},\n") catch return;
-    }
-    writer.writeAll("\t],") catch return;
-    std.fmt.format(writer, ",\n\tcu_avail: {d}", .{effects.cu_avail}) catch return;
-    std.fmt.format(writer, ",\n\treturn_data: {any}", .{effects.return_data.getSlice()}) catch return;
-    writer.writeAll("\n}\n") catch return;
-    std.debug.print("{s}", .{writer.context.getWritten()});
-}
-
 pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
     tc: *const TransactionContext,
     err: i64,
@@ -463,10 +408,12 @@ pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
     };
 }
 
-pub fn extractInputDataRegions(
-    allocator: std.mem.Allocator,
-    memory_map: sig.vm.memory.MemoryMap,
-) !std.ArrayList(pb.InputDataRegion) {
+pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
+    const size = @min(dst.len, prefix.len);
+    @memcpy(dst[0..size], prefix[0..size]);
+}
+
+pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
     var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
     errdefer regions.deinit();
 
@@ -476,10 +423,13 @@ pub fn extractInputDataRegions(
     };
 
     for (mm_regions) |region| {
-        if (region.vm_addr_start >= sig.vm.memory.INPUT_START) {
+        if (region.vm_addr_start >= memory.INPUT_START) {
             try regions.append(.{
-                .offset = region.vm_addr_start - sig.vm.memory.INPUT_START,
-                .is_writable = region.host_memory == .mutable,
+                .offset = region.vm_addr_start - memory.INPUT_START,
+                .is_writable = switch (region.host_memory) {
+                    .constant => false,
+                    .mutable => true,
+                },
                 .content = try ManagedString.copy(region.constSlice(), allocator),
             });
         }
@@ -494,7 +444,182 @@ pub fn extractInputDataRegions(
     return regions;
 }
 
-pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
-    const size = @min(dst.len, prefix.len);
-    @memcpy(dst[0..size], prefix[0..size]);
+pub fn printPbInstrContext(ctx: pb.InstrContext) !void {
+    var buffer = [_]u8{0} ** (1024 * 1024);
+    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = fbs.writer();
+    try writer.writeAll("InstrContext {");
+    try std.fmt.format(writer, "\n\tprogram_id: {any}", .{
+        Pubkey{ .data = ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
+    });
+    try writer.writeAll(",\n\taccounts: [");
+    for (ctx.accounts.items) |acc| {
+        try writer.writeAll("\n\t\tAcctState {");
+        try std.fmt.format(writer, "\n\t\t\taddress: {any}", .{
+            Pubkey{ .data = acc.address.getSlice()[0..Pubkey.SIZE].* },
+        });
+        try std.fmt.format(writer, ",\n\t\t\tlamports: {d}", .{acc.lamports});
+        try std.fmt.format(writer, ",\n\t\t\tdata: {any}", .{acc.data.getSlice()});
+        try std.fmt.format(writer, ",\n\t\t\texecutable: {}", .{acc.executable});
+        try std.fmt.format(writer, ",\n\t\t\trent_epoch: {}", .{acc.rent_epoch});
+        try std.fmt.format(writer, ",\n\t\t\towner: {any}", .{
+            Pubkey{ .data = acc.owner.getSlice()[0..Pubkey.SIZE].* },
+        });
+        try writer.writeAll("\n\t\t},\n");
+    }
+    try writer.writeAll("\t],\n\tinstr_accounts: [");
+    for (ctx.instr_accounts.items) |acc| {
+        try writer.writeAll("\n\t\tInstrAcct {");
+        try std.fmt.format(writer, "\n\t\t\tindex: {}", .{acc.index});
+        try std.fmt.format(writer, ",\n\t\t\tis_signer: {}", .{acc.is_signer});
+        try std.fmt.format(writer, ",\n\t\t\tis_writable: {}", .{acc.is_writable});
+        try writer.writeAll("\n\t\t},\n");
+    }
+    try std.fmt.format(writer, "\t],\n\tdata: {any}", .{ctx.data.getSlice()});
+    try std.fmt.format(writer, ",\n\tcu_avail: {d}", .{ctx.cu_avail});
+    try writer.writeAll(",\n}\n");
+    std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn printPbInstrEffects(effects: pb.InstrEffects) !void {
+    var buffer = [_]u8{0} ** (1024 * 1024);
+    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = fbs.writer();
+    try writer.writeAll("InstrEffects {");
+    try std.fmt.format(writer, "\n\tresult: {d}", .{effects.result});
+    try std.fmt.format(writer, ",\n\tcustom_err: {d}", .{effects.custom_err});
+    try writer.writeAll(",\n\tmodified_accounts: [");
+    for (effects.modified_accounts.items) |acc| {
+        try writer.writeAll("\n\t\tAcctState {");
+        try std.fmt.format(writer, "\n\t\t\taddress: {}", .{
+            Pubkey{ .data = acc.address.getSlice()[0..Pubkey.SIZE].* },
+        });
+        try std.fmt.format(writer, ",\n\t\t\tlamports: {d}", .{acc.lamports});
+        try std.fmt.format(writer, ",\n\t\t\tdata: {any}", .{acc.data.getSlice()});
+        try std.fmt.format(writer, ",\n\t\t\texecutable: {}", .{acc.executable});
+        try std.fmt.format(writer, ",\n\t\t\trent_epoch: {}", .{acc.rent_epoch});
+        try std.fmt.format(writer, ",\n\t\t\towner: {}", .{
+            Pubkey{ .data = acc.owner.getSlice()[0..Pubkey.SIZE].* },
+        });
+        try writer.writeAll("\n\t\t},\n");
+    }
+    try writer.writeAll("\t],");
+    try std.fmt.format(writer, ",\n\tcu_avail: {d}", .{effects.cu_avail});
+    try std.fmt.format(writer, ",\n\treturn_data: {any}", .{effects.return_data.getSlice()});
+    try writer.writeAll("\n}\n");
+    std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn printPbVmContext(ctx: pb.VmContext) !void {
+    var buffer = [_]u8{0} ** (1024 * 1024);
+    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = fbs.writer();
+    try writer.writeAll("VmContext {");
+    try std.fmt.format(writer, "\n\theap_max: {}", .{ctx.heap_max});
+    try std.fmt.format(writer, ",\n\trodata: {any}", .{ctx.rodata.getSlice()});
+    try std.fmt.format(writer, ",\n\trodata_text_section_offset: {}", .{ctx.rodata_text_section_offset});
+    try std.fmt.format(writer, ",\n\trodata_text_section_length: {}", .{ctx.rodata_text_section_length});
+    try writer.writeAll(",\n\tinput_data_regions: [");
+    for (ctx.input_data_regions.items) |region| {
+        try writer.writeAll("\n\t\tInputDataRegion {");
+        try std.fmt.format(writer, "\n\t\t\toffset: {}", .{region.offset});
+        try std.fmt.format(writer, ",\n\t\t\tcontent: {any}", .{region.content.getSlice()});
+        try std.fmt.format(writer, ",\n\t\t\tis_writable: {}", .{region.is_writable});
+        try writer.writeAll("\n\t\t},\n");
+    }
+    try writer.writeAll("\t],");
+    try std.fmt.format(writer, "\n\tr0: {}", .{ctx.r0});
+    try std.fmt.format(writer, ",\n\tr1: {}", .{ctx.r1});
+    try std.fmt.format(writer, ",\n\tr2: {}", .{ctx.r2});
+    try std.fmt.format(writer, ",\n\tr3: {}", .{ctx.r3});
+    try std.fmt.format(writer, ",\n\tr4: {}", .{ctx.r4});
+    try std.fmt.format(writer, ",\n\tr5: {}", .{ctx.r5});
+    try std.fmt.format(writer, ",\n\tr6: {}", .{ctx.r6});
+    try std.fmt.format(writer, ",\n\tr7: {}", .{ctx.r7});
+    try std.fmt.format(writer, ",\n\tr8: {}", .{ctx.r8});
+    try std.fmt.format(writer, ",\n\tr9: {}", .{ctx.r9});
+    try std.fmt.format(writer, ",\n\tr10: {}", .{ctx.r10});
+    try std.fmt.format(writer, ",\n\tr11: {}", .{ctx.r11});
+    try std.fmt.format(writer, ",\n\tcheck_align: {}", .{ctx.check_align});
+    try std.fmt.format(writer, ",\n\tcheck_size: {}", .{ctx.check_size});
+    try std.fmt.format(writer, ",\n\tentry_pc: {}", .{ctx.entry_pc});
+    try std.fmt.format(writer, ",\n\tcall_whitelist: {any}", .{ctx.call_whitelist.getSlice()});
+    try std.fmt.format(writer, ",\n\ttracing_enabled: {}", .{ctx.tracing_enabled});
+    try std.fmt.format(writer, ",\n\treturn_data: ", .{});
+    if (ctx.return_data) |rd| {
+        try std.fmt.format(writer, "{{\n\t\tprogram_id: {},\n\t\tdata: {any}\n\t}}", .{
+            Pubkey{ .data = rd.program_id.getSlice()[0..Pubkey.SIZE].* },
+            rd.data.getSlice(),
+        });
+    } else {
+        try writer.writeAll("null");
+    }
+    try std.fmt.format(writer, ",\n\tsbpf_version: {}", .{ctx.sbpf_version});
+    try writer.writeAll("\n}\n");
+    std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn printPbSyscallInvocation(ctx: pb.SyscallInvocation) !void {
+    var buffer = [_]u8{0} ** (1024 * 1024);
+    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = fbs.writer();
+    try writer.writeAll("SyscallInvocation {");
+    try std.fmt.format(writer, "\n\tfunction_name: {s}", .{ctx.function_name.getSlice()});
+    try std.fmt.format(writer, ",\n\theap_prefix: {any}", .{ctx.heap_prefix.getSlice()});
+    try std.fmt.format(writer, ",\n\tstack_prefix: {any}", .{ctx.stack_prefix.getSlice()});
+    try writer.writeAll("\n}\n");
+    std.debug.print("{s}", .{writer.context.getWritten()});
+}
+
+pub fn printPbSyscallContext(pb_syscall_ctx: pb.SyscallContext) !void {
+    const pb_instr = pb_syscall_ctx.instr_ctx orelse
+        return error.NoInstrCtx;
+    const pb_vm = pb_syscall_ctx.vm_ctx orelse
+        return error.NoVmCtx;
+    const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse
+        return error.NoSyscallInvocation;
+    try printPbInstrContext(pb_instr);
+    try printPbVmContext(pb_vm);
+    try printPbSyscallInvocation(pb_syscall_invocation);
+    if (pb_syscall_ctx.exec_effects) |exec_effects|
+        try printPbInstrEffects(exec_effects);
+}
+
+pub fn printPbSyscallEffects(ctx: pb.SyscallEffects) !void {
+    var buffer = [_]u8{0} ** (1024 * 1024);
+    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = fbs.writer();
+    try writer.writeAll("SyscallEffects {");
+    try std.fmt.format(writer, "\n\terror: {}", .{ctx.@"error"});
+    try std.fmt.format(writer, ",\n\terr_kind: {}", .{ctx.error_kind});
+    try std.fmt.format(writer, ",\n\tr0: {}", .{ctx.r0});
+    try std.fmt.format(writer, ",\n\tcu_avail: {}", .{ctx.cu_avail});
+    try std.fmt.format(writer, ",\n\theap.len: {}", .{ctx.heap.getSlice().len});
+    try std.fmt.format(writer, ",\n\tstack.len: {}", .{ctx.stack.getSlice().len});
+    // try std.fmt.format(writer, ",\n\tinputdata: {any}", .{ctx.inputdata.getSlice()}); // Deprecated
+    try std.fmt.format(writer, ",\n\tinput_data_regions: [", .{});
+    for (ctx.input_data_regions.items) |region| {
+        try writer.writeAll("\n\t\tInputDataRegion {");
+        try std.fmt.format(writer, "\n\t\t\toffset: {}", .{region.offset});
+        try std.fmt.format(writer, ",\n\t\t\tcontent.len: {}", .{region.content.getSlice().len});
+        try std.fmt.format(writer, ",\n\t\t\tis_writable: {}", .{region.is_writable});
+        try writer.writeAll("\n\t\t},\n");
+    }
+    try writer.writeAll("\t],");
+    try std.fmt.format(writer, "\n\tframe_count: {}", .{ctx.frame_count});
+    try std.fmt.format(writer, ",\n\tlog: {s}", .{ctx.log.getSlice()});
+    try std.fmt.format(writer, ",\n\trodata.len: {}", .{ctx.rodata.getSlice().len});
+    try std.fmt.format(writer, ",\n\tpc: {}", .{ctx.pc});
+    try std.fmt.format(writer, ",\n\tr1: {}", .{ctx.r1});
+    try std.fmt.format(writer, ",\n\tr2: {}", .{ctx.r2});
+    try std.fmt.format(writer, ",\n\tr3: {}", .{ctx.r3});
+    try std.fmt.format(writer, ",\n\tr4: {}", .{ctx.r4});
+    try std.fmt.format(writer, ",\n\tr5: {}", .{ctx.r5});
+    try std.fmt.format(writer, ",\n\tr6: {}", .{ctx.r6});
+    try std.fmt.format(writer, ",\n\tr7: {}", .{ctx.r7});
+    try std.fmt.format(writer, ",\n\tr8: {}", .{ctx.r8});
+    try std.fmt.format(writer, ",\n\tr9: {}", .{ctx.r9});
+    try std.fmt.format(writer, ",\n\tr10: {}", .{ctx.r10});
+    try writer.writeAll("\n}\n");
+    std.debug.print("{s}", .{writer.context.getWritten()});
 }
