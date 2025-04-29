@@ -156,6 +156,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     // Set return data
     if (pb_vm.return_data) |return_data| {
+        if (return_data.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         const program_id = Pubkey{ .data = return_data.program_id.getSlice()[0..Pubkey.SIZE].* };
         tc.return_data = .{ .program_id = program_id, .data = .{} };
         try tc.return_data.data.appendSlice(return_data.data.getSlice());
@@ -165,6 +166,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_syscalls.rs#L128-L130
 
     // Create instruction info and push it to the transaction context
+    if (pb_instr.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
         allocator,
         tc,
@@ -198,10 +200,10 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
-        allocator,
-        ic,
-        !direct_mapping,
-    );
+            allocator,
+            ic,
+            !direct_mapping,
+        );
     defer {
         allocator.free(parameter_bytes);
         allocator.free(regions);
