@@ -63,6 +63,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
+    errdefer comptime unreachable;
 
     if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
         if (recent_blockhashes.entries.len > 0) {
@@ -250,7 +251,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.slot_hashes == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.SlotHashes.ID)) |slot_hashes_data| {
             sysvar_cache.slot_hashes_obj = sig.bincode.readFromSlice(
-                allocator,
+                std.testing.failing_allocator,
                 sysvar.SlotHashes,
                 slot_hashes_data,
                 .{},
@@ -263,7 +264,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.stake_history == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.StakeHistory.ID)) |stake_history_data| {
             sysvar_cache.stake_history_obj = sig.bincode.readFromSlice(
-                allocator,
+                std.testing.failing_allocator,
                 sysvar.StakeHistory,
                 stake_history_data,
                 .{},
@@ -276,7 +277,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.fees == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.Fees.ID)) |fees_data| {
             sysvar_cache.fees = sig.bincode.readFromSlice(
-                allocator,
+                std.testing.failing_allocator,
                 sysvar.Fees,
                 fees_data,
                 .{},
@@ -286,7 +287,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.recent_blockhashes == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
             sysvar_cache.recent_blockhashes = sig.bincode.readFromSlice(
-                allocator,
+                std.testing.failing_allocator,
                 sysvar.RecentBlockhashes,
                 recent_blockhashes_data,
                 .{},

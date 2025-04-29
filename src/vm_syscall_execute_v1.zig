@@ -40,16 +40,13 @@ export fn sol_compat_vm_syscall_execute_v1(
     in_size: u64,
 ) i32 {
     errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
-    const allocator = std.heap.c_allocator;
 
-    var decode_arena = std.heap.ArenaAllocator.init(allocator);
-    defer decode_arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     const in_slice = in_ptr[0..in_size];
-    var ctx = pb.SyscallContext.decode(
-        in_slice,
-        decode_arena.allocator(),
-    ) catch |err| {
+    var ctx = pb.SyscallContext.decode(in_slice, allocator) catch |err| {
         std.debug.print("pb.Syscall.decode: {s}\n", .{@errorName(err)});
         return 0;
     };
@@ -64,6 +61,7 @@ export fn sol_compat_vm_syscall_execute_v1(
         std.debug.print("executeSyscall: {s}\n", .{@errorName(err)});
         return 0;
     };
+    defer result.deinit();
 
     // utils.printPbSyscallEffects(result) catch |err| {
     //     std.debug.print("printPbSyscallEffects: {s}\n", .{@errorName(err)});
@@ -200,10 +198,10 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
-            allocator,
-            ic,
-            !direct_mapping,
-        );
+        allocator,
+        ic,
+        !direct_mapping,
+    );
     defer {
         allocator.free(parameter_bytes);
         allocator.free(regions);

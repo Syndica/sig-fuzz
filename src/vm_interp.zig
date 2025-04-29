@@ -32,10 +32,7 @@ export fn sol_compat_vm_interp_v1(
     in_size: u64,
 ) i32 {
     errdefer |err| std.debug.panic("err: {s}", .{@errorName(err)});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
