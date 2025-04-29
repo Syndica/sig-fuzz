@@ -317,7 +317,10 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         const e, const ek, const msg = try convertExecutionError(err);
         @"error" = e;
         error_kind = ek;
-        try sig.runtime.stable_log.programFailure(tc, instr_info.program_meta.pubkey, msg);
+        // Agave doesn't log Poseidon errors
+        if (e != -1) {
+            try sig.runtime.stable_log.programFailure(tc, instr_info.program_meta.pubkey, msg);
+        }
     }
 
     const effects = try utils.createSyscallEffect(allocator, .{
@@ -346,7 +349,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     return effects;
 }
 
-pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { u8, pb.ErrKind, []const u8 } {
+pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { i64, pb.ErrKind, []const u8 } {
     return switch (err) {
         EbpfError.ElfError => .{ 1, .EBPF, "ELF error" },
         EbpfError.FunctionAlreadyRegistered => .{ 2, .EBPF, "function was already registered" },
@@ -445,6 +448,10 @@ pub fn convertExecutionError(err: sig.vm.ExecutionError) !struct { u8, pb.ErrKin
         InstructionError.MaxAccountsExceeded => .{ 52, .INSTRUCTION, "Max accounts exceeded" },
         InstructionError.MaxInstructionTraceLengthExceeded => .{ 53, .INSTRUCTION, "Max instruction trace length exceeded" },
         InstructionError.BuiltinProgramsMustConsumeComputeUnits => .{ 54, .INSTRUCTION, "Builtin programs must consume compute units" },
+
+        // Not logged in Agave
+        SyscallError.InvalidEndianness => .{ -1, .SYSCALL, "Invalid endianness." },
+        SyscallError.InvalidParameters => .{ -1, .SYSCALL, "Invalid parameters." },
 
         else => {
             std.debug.print("Sig error: {s}\n", .{@errorName(err)});
