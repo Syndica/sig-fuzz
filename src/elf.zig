@@ -62,8 +62,8 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .{ "sol_log_64_", syscalls.log64 },
         .{ "sol_log_pubkey", syscalls.logPubkey },
         .{ "sol_log_compute_units_", syscalls.logComputeUnits },
-        .{ "sol_memset_", syscalls.memset },
-        .{ "sol_memcpy_", syscalls.memcpy },
+        .{ "sol_memset_", syscalls.memops.memset },
+        .{ "sol_memcpy_", syscalls.memops.memcpy },
         .{ "abort", syscalls.abort },
     }) |entry| {
         const name, const function = entry;
