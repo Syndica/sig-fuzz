@@ -364,7 +364,8 @@ pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
     stack: []const u8,
     rodata: []const u8,
     frame_count: u64,
-    memory_map: memory.MemoryMap,
+    memory_map: sig.vm.memory.MemoryMap,
+    registers: sig.vm.interpreter.RegisterMap = sig.vm.interpreter.RegisterMap.initFill(0),
 }) !pb.SyscallEffects {
     var log = std.ArrayList(u8).init(allocator);
     defer log.deinit();
@@ -392,20 +393,24 @@ pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
         .frame_count = params.frame_count,
         .log = try ManagedString.copy(log.items, allocator),
         .rodata = try ManagedString.copy(params.rodata, allocator),
-        // Registers are only for Vm Interp
-        .r0 = 0,
-        .r1 = 0,
-        .r2 = 0,
-        .r3 = 0,
-        .r4 = 0,
-        .r5 = 0,
-        .r6 = 0,
-        .r7 = 0,
-        .r8 = 0,
-        .r9 = 0,
-        .r10 = 0,
-        .pc = 0,
+        .r0 = params.registers.get(.r0),
+        .r1 = params.registers.get(.r1),
+        .r2 = params.registers.get(.r2),
+        .r3 = params.registers.get(.r3),
+        .r4 = params.registers.get(.r4),
+        .r5 = params.registers.get(.r5),
+        .r6 = params.registers.get(.r6),
+        .r7 = params.registers.get(.r7),
+        .r8 = params.registers.get(.r8),
+        .r9 = params.registers.get(.r9),
+        .r10 = params.registers.get(.r10),
+        .pc = params.registers.get(.pc),
     };
+}
+
+pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
+    const size = @min(dst.len, prefix.len);
+    @memcpy(dst[0..size], prefix[0..size]);
 }
 
 pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
@@ -617,61 +622,4 @@ pub fn printPbSyscallEffects(ctx: pb.SyscallEffects) !void {
     try std.fmt.format(writer, ",\n\tr10: {}", .{ctx.r10});
     try writer.writeAll("\n}\n");
     std.debug.print("{s}", .{writer.context.getWritten()});
-}
-
-pub fn createSyscallEffect(allocator: std.mem.Allocator, params: struct {
-    tc: *const TransactionContext,
-    err: i64,
-    err_kind: pb.ErrKind,
-    heap: []const u8,
-    stack: []const u8,
-    rodata: []const u8,
-    frame_count: u64,
-    memory_map: sig.vm.memory.MemoryMap,
-    registers: sig.vm.interpreter.RegisterMap = sig.vm.interpreter.RegisterMap.initFill(0),
-}) !pb.SyscallEffects {
-    var log = std.ArrayList(u8).init(allocator);
-    defer log.deinit();
-    if (params.tc.log_collector) |log_collector| {
-        for (log_collector.collect()) |msg| {
-            try log.appendSlice(msg);
-            try log.append('\n');
-        }
-        if (log.items.len > 0) _ = log.pop();
-    }
-
-    const input_data_regions = try extractInputDataRegions(
-        allocator,
-        params.memory_map,
-    );
-
-    return .{
-        .@"error" = params.err,
-        .error_kind = params.err_kind,
-        .cu_avail = params.tc.compute_meter,
-        .heap = try ManagedString.copy(params.heap, allocator),
-        .stack = try ManagedString.copy(params.stack, allocator),
-        .inputdata = .Empty, // Deprecated
-        .input_data_regions = input_data_regions,
-        .frame_count = params.frame_count,
-        .log = try ManagedString.copy(log.items, allocator),
-        .rodata = try ManagedString.copy(params.rodata, allocator),
-        .r0 = params.registers.get(.r0),
-        .r1 = params.registers.get(.r1),
-        .r2 = params.registers.get(.r2),
-        .r3 = params.registers.get(.r3),
-        .r4 = params.registers.get(.r4),
-        .r5 = params.registers.get(.r5),
-        .r6 = params.registers.get(.r6),
-        .r7 = params.registers.get(.r7),
-        .r8 = params.registers.get(.r8),
-        .r9 = params.registers.get(.r9),
-        .r10 = params.registers.get(.r10),
-        .pc = params.registers.get(.pc),
-    };
-}
-
-pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
-    const size = @min(dst.len, prefix.len);
-    @memcpy(dst[0..size], prefix[0..size]);
 }

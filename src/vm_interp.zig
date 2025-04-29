@@ -83,7 +83,6 @@ fn executeVmTest(
     const ec, const sc, const tc = try utils.createExecutionContexts(
         allocator,
         instr_context,
-        true,
     );
     defer {
         ec.deinit();
@@ -131,10 +130,10 @@ fn executeVmTest(
 
     const parameter_bytes, const regions, const accounts_metadata =
         try serialize.serializeParameters(
-            allocator,
-            &ic,
-            !direct_mapping,
-        );
+        allocator,
+        &ic,
+        !direct_mapping,
+    );
     defer {
         allocator.free(parameter_bytes);
         allocator.free(regions);
