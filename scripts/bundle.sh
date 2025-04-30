@@ -9,7 +9,7 @@ cp temp/fuzz_sol* bundle/target
 cp target/*.fc bundle/target
 
 cd sig/
-sig_commit_id=$(git log --format="%H" -n )
+sig_commit_id=$(git log --format="%H" -n 1)
 cd ../
 
 commit_id=$(git log --format="%H" -n 1)
