@@ -177,8 +177,11 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     try executor.pushInstruction(tc, instr_info);
     const ic = try tc.getCurrentInstructionContext();
 
-    const rodata = try allocator.dupe(u8, pb_vm.rodata.getSlice());
+    const host_align = 16;
+
+    const rodata = try allocator.alignedAlloc(u8, host_align, pb_vm.rodata.getSlice().len);
     defer allocator.free(rodata);
+    @memcpy(rodata, pb_vm.rodata.getSlice());
 
     const executable: sig.vm.Executable = .{
         .instructions = &.{},
@@ -212,11 +215,11 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
 
-    const heap = try allocator.alloc(u8, heap_max);
+    const heap = try allocator.alignedAlloc(u8, host_align, heap_max);
     defer allocator.free(heap);
     @memset(heap, 0);
 
-    const stack = try allocator.alloc(u8, STACK_SIZE);
+    const stack = try allocator.alignedAlloc(u8, host_align, STACK_SIZE);
     defer allocator.free(stack);
     @memset(stack, 0);
 
@@ -239,14 +242,17 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     var input_data_offset: u64 = 0;
     for (pb_vm.input_data_regions.items) |input_region| {
         if (input_region.content.isEmpty()) continue;
+
+        const copy = input_region.content.getSlice();
+        const duped = try allocator.alignedAlloc(u8, host_align, copy.len);
+        @memcpy(duped, copy);
+
         if (input_region.is_writable) {
-            const mutable = try allocator.dupe(u8, input_region.content.getSlice());
             try mm_regions.append(
                 allocator,
-                memory.Region.init(.mutable, mutable, memory.INPUT_START + input_data_offset),
+                memory.Region.init(.mutable, duped, memory.INPUT_START + input_data_offset),
             );
         } else {
-            const duped = try allocator.dupe(u8, input_region.content.getSlice());
             try mm_regions.append(
                 allocator,
                 memory.Region.init(.constant, duped, memory.INPUT_START + input_data_offset),
