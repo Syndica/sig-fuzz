@@ -5,8 +5,8 @@
     .dependencies = .{
         .sig = .{ .path = "sig/" },
         .pb = .{
-            .url = "git+https://github.com/Rexicon226/zig-protobuf#d4ebc5a41c5e537383357ea3a91dd1f4e95ea206",
-            .hash = "1220121c5700251c22d334ae4f079fb37512c195797ceac0c09f43273b9a2050e615",
+            .url = "git+https://github.com/Rexicon226/zig-protobuf#aa2bd47eccc470817115f40f173bcf42c862dcb8",
+            .hash = "12201db62d80afc3753a9ed731d471f991e3962aa904b9c7cfbfd72d14fa712a9695",
         },
         .protosol = .{
             .url = "git+https://github.com/firedancer-io/protosol#77618bb8f83d494a41be3934410f793357e86b18",
