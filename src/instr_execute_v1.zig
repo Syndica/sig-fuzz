@@ -36,7 +36,7 @@ export fn sol_compat_instr_execute_v1(
     };
     defer pb_instr_ctx.deinit();
 
-    // printPbInstrContext(ctx) catch |err| {
+    // utils.printPbInstrContext(pb_instr_ctx) catch |err| {
     //     std.debug.print("printPbInstrContext: {s}\n", .{@errorName(err)});
     //     return 0;
     // };

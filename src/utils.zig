@@ -60,6 +60,7 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .compute_budget = sig.runtime.ComputeBudget.default(instr_ctx.cu_avail),
         .custom_error = null,
         .log_collector = sig.runtime.LogCollector.default(),
+        .rent = sc.sysvar_cache.get(sysvar.Rent) catch sysvar.Rent.DEFAULT,
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
@@ -212,7 +213,7 @@ pub fn createSysvarCache(
 
     var sysvar_cache = sig.runtime.SysvarCache{};
     sysvar_cache.clock = try cloneSysvarData(allocator, ctx, sysvar.Clock.ID);
-    if (sysvar_cache.clock == null) {
+    if (std.meta.isError(sysvar_cache.get(sysvar.Clock))) {
         var clock = sysvar.Clock.DEFAULT;
         clock.slot = 10;
         sysvar_cache.clock = try sig.bincode.writeAlloc(
@@ -222,7 +223,7 @@ pub fn createSysvarCache(
         );
     }
     sysvar_cache.epoch_schedule = try cloneSysvarData(allocator, ctx, sig.core.EpochSchedule.ID);
-    if (sysvar_cache.epoch_schedule == null) {
+    if (std.meta.isError(sysvar_cache.get(sysvar.EpochSchedule))) {
         sysvar_cache.epoch_schedule = try sig.bincode.writeAlloc(
             allocator,
             sig.core.EpochSchedule.DEFAULT,
@@ -231,7 +232,7 @@ pub fn createSysvarCache(
     }
     sysvar_cache.epoch_rewards = try cloneSysvarData(allocator, ctx, sysvar.EpochRewards.ID);
     sysvar_cache.rent = try cloneSysvarData(allocator, ctx, sysvar.Rent.ID);
-    if (sysvar_cache.rent == null) {
+    if (std.meta.isError(sysvar_cache.get(sysvar.Rent))) {
         sysvar_cache.rent = sig.bincode.writeAlloc(
             allocator,
             sysvar.Rent.DEFAULT,
@@ -239,7 +240,7 @@ pub fn createSysvarCache(
         ) catch null;
     }
     sysvar_cache.last_restart_slot = try cloneSysvarData(allocator, ctx, sysvar.LastRestartSlot.ID);
-    if (sysvar_cache.last_restart_slot == null) {
+    if (std.meta.isError(sysvar_cache.get(sysvar.LastRestartSlot))) {
         sysvar_cache.last_restart_slot = sig.bincode.writeAlloc(
             allocator,
             sysvar.LastRestartSlot{
@@ -251,7 +252,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.slot_hashes == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.SlotHashes.ID)) |slot_hashes_data| {
             sysvar_cache.slot_hashes_obj = sig.bincode.readFromSlice(
-                std.testing.failing_allocator,
+                allocator,
                 sysvar.SlotHashes,
                 slot_hashes_data,
                 .{},
@@ -264,7 +265,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.stake_history == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.StakeHistory.ID)) |stake_history_data| {
             sysvar_cache.stake_history_obj = sig.bincode.readFromSlice(
-                std.testing.failing_allocator,
+                allocator,
                 sysvar.StakeHistory,
                 stake_history_data,
                 .{},
@@ -287,7 +288,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.recent_blockhashes == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
             sysvar_cache.recent_blockhashes = sig.bincode.readFromSlice(
-                std.testing.failing_allocator,
+                allocator,
                 sysvar.RecentBlockhashes,
                 recent_blockhashes_data,
                 .{},
@@ -460,7 +461,7 @@ pub fn printPbInstrContext(ctx: pb.InstrContext) !void {
             Pubkey{ .data = acc.address.getSlice()[0..Pubkey.SIZE].* },
         });
         try std.fmt.format(writer, ",\n\t\t\tlamports: {d}", .{acc.lamports});
-        try std.fmt.format(writer, ",\n\t\t\tdata: {any}", .{acc.data.getSlice()});
+        try std.fmt.format(writer, ",\n\t\t\tdata.len: {any}", .{acc.data.getSlice().len});
         try std.fmt.format(writer, ",\n\t\t\texecutable: {}", .{acc.executable});
         try std.fmt.format(writer, ",\n\t\t\trent_epoch: {}", .{acc.rent_epoch});
         try std.fmt.format(writer, ",\n\t\t\towner: {any}", .{
