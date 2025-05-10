@@ -3,7 +3,7 @@
 set -e
 
 repo_solfuzz="firedancer-io/solfuzz"
-repo_agave="Syndica/solfuzz-agave"
+repo_agave="firedancer-io/solfuzz-agave"
 
 repos=("$repo_agave" "$repo_solfuzz")
 artifacts_agave=("libsolfuzz-agave.so")
