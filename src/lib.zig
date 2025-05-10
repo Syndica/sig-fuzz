@@ -256,6 +256,7 @@ const SUPPORTED_FEATURES = [_]u64{
     0xbda9b281a350ae03,
     0x8ef4f4fdbc3d6c85,
     0xd571e3dc9532c905,
+    0x7cc7d1c81116eae0,
 };
 
 const FEATURES: SolCompatFeatures = .{
