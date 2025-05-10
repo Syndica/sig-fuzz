@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
             "protosol/proto/elf.proto",
             "protosol/proto/vm.proto",
             "protosol/proto/shred.proto",
+            "protosol/proto/txn.proto",
         },
         .include_directories = &.{"protosol/proto"},
     });
