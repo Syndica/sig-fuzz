@@ -105,10 +105,59 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     };
 }
 
-pub const TransactionWithMeta = struct {
-    transaction: Transaction,
-    loaded_addresses: []const Pubkey,
-};
+// pub const TransactionWithMeta = struct {
+//     // The base transaction
+//     transaction: *const Transaction,
+
+//     // The accounts from txn
+//     accounts: std.MultiArrayList(struct { key: Pubkey, writeable: bool }),
+
+//     pub fn deinit(self: *TransactionWithMeta, allocator: *std.mem.Allocator) void {
+//         self.transaction.deinit(allocator);
+//         self.accounts.deinit(allocator);
+//     }
+// };
+
+// pub fn createAccounts(
+//     allocator: std.mem.Allocator,
+//     transaction: *const Transaction,
+//     loaded_writable_accounts: []const Pubkey,
+//     loaded_readonly_accounts: []const Pubkey,
+// ) error{OutOfMemory}!std.MultiArrayList(struct { key: Pubkey, writeable: bool }) {
+//     const num_txn = transaction.msg.account_keys.len;
+//     const num_loaded_writable = loaded_writable_accounts.len;
+//     const num_loaded_readonly = loaded_readonly_accounts.len;
+
+//     const num_signed_accounts = transaction.msg.signature_count;
+//     const num_readonly_signed_accounts = transaction.msg.readonly_signed_count;
+//     const num_readonly_unsigned_accounts = transaction.msg.readonly_unsigned_count;
+
+//     const accounts_len = transaction.msg.account_keys.len +
+//         loaded_writable_accounts.len +
+//         loaded_readonly_accounts.len;
+
+//     const accounts = std.MultiArrayList(struct { key: Pubkey, writeable: bool }){};
+//     try accounts.ensureTotalCapacity(
+//         allocator,
+//         accounts_len,
+//     );
+
+//     for (pubkeys, 0..) |pubkey, index| {
+//         if (index >= num_txn) {
+//             accounts.appendAssumeCapacity(.{
+//                 pubkey,
+//                 index - num_txn < num_loaded_writable,
+//             });
+//         } else if (index >= num_signed_accounts) {
+//             const num_unsigned_accounts = num_txn - num_signed_accounts;
+//             const num_writable_unsigned_accounts = num_unsigned_accounts - num_readonly_unsigned_accounts;
+//             accounts.appendAssumeCapacity(.{
+//                 pubkey,
+//                 index - num_signed_accounts < num_writable_unsigned_accounts,
+//             });
+//         }
+//     }
+// }
 
 pub const TransactionError = error{
     /// An account is already being processed in another transaction in a way
