@@ -33,6 +33,22 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
     ec.* = .{
         .allocator = allocator,
         .feature_set = try createFeatureSet(allocator, instr_ctx),
+        // TODO: hookup with bank
+        .epoch_stakes = .{
+            .stakes = .{
+                .vote_accounts = .{
+                    .accounts = .{},
+                    .staked_nodes = null,
+                },
+                .delegations = .{},
+                .unused = 0,
+                .epoch = 0,
+                .history = &.{},
+            },
+            .total_stake = 0,
+            .node_id_to_vote_accounts = .{},
+            .epoch_authorized_voters = .{},
+        },
     };
 
     const sc = try allocator.create(SlotContext);
