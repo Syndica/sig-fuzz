@@ -69,23 +69,17 @@ export fn sol_compat_instr_execute_v1(
 }
 
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
-    const ec, const sc, const tc = try utils.createExecutionContexts(
+    var tc = try utils.createTransactionContext(
         allocator,
         pb_instr_ctx,
+        .{},
     );
-    defer {
-        ec.deinit();
-        allocator.destroy(ec);
-        sc.deinit();
-        allocator.destroy(sc);
-        tc.deinit();
-        allocator.destroy(tc);
-    }
+    defer utils.deinitTransactionContext(allocator, tc);
 
     if (pb_instr_ctx.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
         allocator,
-        tc,
+        &tc,
         .{ .data = pb_instr_ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
         pb_instr_ctx.data.getSlice(),
         pb_instr_ctx.instr_accounts.items,
@@ -95,7 +89,7 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
     var result: ?InstructionError = null;
     executor.executeInstruction(
         allocator,
-        tc,
+        &tc,
         instr_info,
     ) catch |err| {
         switch (err) {
@@ -113,7 +107,7 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
 
     return utils.createInstrEffects(
         allocator,
-        tc,
+        &tc,
         result,
     );
 }
