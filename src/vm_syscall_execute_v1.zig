@@ -23,6 +23,7 @@ const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
+const FeatureSet = sig.runtime.FeatureSet;
 
 const Pubkey = sig.core.Pubkey;
 
@@ -107,30 +108,23 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // }
 
     // Create execution contexts
-    const ec, const sc, const tc = try utils.createExecutionContexts(
+    var tc = try utils.createTransactionContext(
         allocator,
         pb_instr,
+        .{},
     );
-    defer {
-        ec.deinit();
-        allocator.destroy(ec);
-        sc.deinit();
-        allocator.destroy(sc);
-        tc.deinit();
-        allocator.destroy(tc);
-    }
-
+    defer utils.deinitTransactionContext(allocator, tc);
     const syscall_registry = try sig.vm.syscalls.register(
         allocator,
-        &ec.feature_set,
-        (try sc.sysvar_cache.get(sysvar.Clock)).slot,
+        tc.feature_set,
+        (try tc.sysvar_cache.get(sysvar.Clock)).slot,
         false,
     );
     defer syscall_registry.deinit(allocator);
 
     const reject_broken_elfs = true;
     const debugging_features = false;
-    const direct_mapping = ec.feature_set.isActive(
+    const direct_mapping = tc.feature_set.isActive(
         features.BPF_ACCOUNT_DATA_DIRECT_MAPPING,
         0,
     );
@@ -167,14 +161,14 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     if (pb_instr.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
         allocator,
-        tc,
+        &tc,
         .{ .data = pb_instr.program_id.getSlice()[0..Pubkey.SIZE].* },
         pb_instr.data.getSlice(),
         pb_instr.instr_accounts.items,
     );
     defer instr_info.deinit(allocator);
 
-    try executor.pushInstruction(tc, instr_info);
+    try executor.pushInstruction(&tc, instr_info);
     const ic = try tc.getCurrentInstructionContext();
 
     const host_align = 16;
@@ -281,7 +275,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         memory_map,
         &syscall_registry,
         stack.len,
-        tc,
+        &tc,
     );
     defer vm.deinit();
 
@@ -306,11 +300,11 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const syscall_fn = syscall_entry.value;
 
     var execution_error: ?sig.vm.ExecutionError = null;
-    syscall_fn(tc, &vm.memory_map, &vm.registers) catch |err| {
+    syscall_fn(&tc, &vm.memory_map, &vm.registers) catch |err| {
         execution_error = err;
     };
 
-    try executor.popInstruction(tc);
+    try executor.popInstruction(&tc);
 
     var @"error": i64, var error_kind: pb.ErrKind = .{ 0, .UNSPECIFIED };
     if (execution_error) |err| {
@@ -319,12 +313,12 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         error_kind = ek;
         // Agave doesn't log Poseidon errors
         if (e != -1) {
-            try sig.runtime.stable_log.programFailure(tc, instr_info.program_meta.pubkey, msg);
+            try sig.runtime.stable_log.programFailure(&tc, instr_info.program_meta.pubkey, msg);
         }
     }
 
     const effects = try utils.createSyscallEffect(allocator, .{
-        .tc = tc,
+        .tc = &tc,
         .err = @"error",
         .err_kind = error_kind,
         .heap = heap,

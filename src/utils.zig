@@ -17,6 +17,9 @@ const EpochContext = sig.runtime.transaction_context.EpochContext;
 const SlotContext = sig.runtime.transaction_context.SlotContext;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
+const FeatureSet = sig.runtime.FeatureSet;
+const SysvarCache = sig.runtime.SysvarCache;
+const EpochStakes = sig.core.stake.EpochStakes;
 
 const Pubkey = sig.core.Pubkey;
 
@@ -24,45 +27,38 @@ const intFromInstructionError = sig.core.instruction.intFromInstructionError;
 
 const EMIT_LOGS = false;
 
-pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.InstrContext) !struct {
-    *EpochContext,
-    *SlotContext,
-    *TransactionContext,
-} {
-    const ec = try allocator.create(EpochContext);
-    ec.* = .{
-        .allocator = allocator,
-        .feature_set = try createFeatureSet(allocator, instr_ctx),
-        // TODO: hookup with bank
-        .epoch_stakes = .{
-            .stakes = .{
-                .vote_accounts = .{
-                    .accounts = .{},
-                    .staked_nodes = null,
-                },
-                .delegations = .{},
-                .unused = 0,
-                .epoch = 0,
-                .history = &.{},
-            },
-            .total_stake = 0,
-            .node_id_to_vote_accounts = .{},
-            .epoch_authorized_voters = .{},
-        },
-    };
+pub fn createTransactionContext(
+    allocator: std.mem.Allocator,
+    instr_ctx: pb.InstrContext,
+    environment: struct {
+        feature_set: ?*FeatureSet = null,
+        epoch_stakes: ?*EpochStakes = null,
+        sysvar_cache: ?*SysvarCache = null,
+    },
+) !TransactionContext {
+    const feature_set = if (environment.feature_set) |ptr|
+        ptr
+    else
+        try allocator.create(FeatureSet);
+    feature_set.* = try createFeatureSet(allocator, instr_ctx);
 
-    const sc = try allocator.create(SlotContext);
-    sc.* = .{
-        .allocator = allocator,
-        .ec = ec,
-        .sysvar_cache = try createSysvarCache(allocator, instr_ctx),
-    };
+    const epoch_stakes = if (environment.epoch_stakes) |ptr|
+        ptr
+    else
+        try allocator.create(EpochStakes);
+    epoch_stakes.* = EpochStakes.EMPTY;
 
-    const tc = try allocator.create(TransactionContext);
-    tc.* = .{
+    var sysvar_cache = if (environment.sysvar_cache) |ptr|
+        ptr
+    else
+        try allocator.create(SysvarCache);
+    sysvar_cache.* = try createSysvarCache(allocator, instr_ctx);
+
+    var tc = TransactionContext{
         .allocator = allocator,
-        .ec = ec,
-        .sc = sc,
+        .feature_set = feature_set,
+        .epoch_stakes = epoch_stakes,
+        .sysvar_cache = sysvar_cache,
         .accounts = try createTransactionContextAccounts(
             allocator,
             instr_ctx.accounts.items,
@@ -76,13 +72,13 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         .compute_budget = sig.runtime.ComputeBudget.default(instr_ctx.cu_avail),
         .custom_error = null,
         .log_collector = sig.runtime.LogCollector.default(),
-        .rent = sc.sysvar_cache.get(sysvar.Rent) catch sysvar.Rent.DEFAULT,
+        .rent = sysvar_cache.get(sysvar.Rent) catch sysvar.Rent.DEFAULT,
         .prev_blockhash = sig.core.Hash.ZEROES,
         .prev_lamports_per_signature = 0,
     };
     errdefer comptime unreachable;
 
-    if (sc.sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
+    if (sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
         if (recent_blockhashes.entries.len > 0) {
             const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
             tc.prev_blockhash = prev_entry.blockhash;
@@ -90,7 +86,23 @@ pub fn createExecutionContexts(allocator: std.mem.Allocator, instr_ctx: pb.Instr
         }
     }
 
-    return .{ ec, sc, tc };
+    return tc;
+}
+
+pub fn deinitTransactionContext(
+    allocator: std.mem.Allocator,
+    tc: TransactionContext,
+) void {
+    tc.feature_set.deinit(allocator);
+    allocator.destroy(tc.feature_set);
+
+    tc.sysvar_cache.deinit(allocator);
+    allocator.destroy(tc.sysvar_cache);
+
+    tc.epoch_stakes.deinit(allocator);
+    allocator.destroy(tc.epoch_stakes);
+
+    tc.deinit();
 }
 
 pub fn createFeatureSet(

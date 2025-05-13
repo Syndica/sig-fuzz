@@ -77,18 +77,15 @@ fn executeVmTest(
         });
     }
 
-    const ec, const sc, const tc = try utils.createExecutionContexts(
+    var feature_set = try allocator.create(sig.runtime.FeatureSet);
+    var tc = try utils.createTransactionContext(
         allocator,
         instr_context,
+        .{
+            .feature_set = feature_set,
+        },
     );
-    defer {
-        ec.deinit();
-        allocator.destroy(ec);
-        sc.deinit();
-        allocator.destroy(sc);
-        tc.deinit();
-        allocator.destroy(tc);
-    }
+    defer utils.deinitTransactionContext(allocator, tc);
 
     const sbpf_version: Version = switch (vm_context.sbpf_version) {
         1 => .v1,
@@ -97,23 +94,23 @@ fn executeVmTest(
         else => .v0,
     };
     if (sbpf_version.gte(.v1)) {
-        try ec.feature_set.active.put(allocator, features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
+        try feature_set.active.put(allocator, features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
     }
 
     const direct_mapping = sbpf_version.gte(.v1) or
-        ec.feature_set.isActive(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
+        feature_set.isActive(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
 
     if (instr_context.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
         allocator,
-        tc,
+        &tc,
         .{ .data = instr_context.program_id.getSlice()[0..Pubkey.SIZE].* },
         instr_context.data.getSlice(),
         instr_context.instr_accounts.items,
     );
     defer instr_info.deinit(allocator);
 
-    try executor.pushInstruction(tc, instr_info);
+    try executor.pushInstruction(&tc, instr_info);
 
     var ic = tc.instruction_stack.buffer[tc.instruction_stack.len - 1];
 
@@ -142,8 +139,8 @@ fn executeVmTest(
 
     const syscall_registry = try createSyscallRegistry(
         allocator,
-        &ec.feature_set,
-        (try sc.sysvar_cache.get(sysvar.Clock)).slot,
+        feature_set,
+        (try tc.sysvar_cache.get(sysvar.Clock)).slot,
         false,
     );
     defer syscall_registry.deinit(allocator);
@@ -242,7 +239,7 @@ fn executeVmTest(
         map,
         &syscall_registry,
         STACK_SIZE,
-        tc,
+        &tc,
     );
     defer vm.deinit();
 
@@ -295,7 +292,7 @@ fn executeVmTest(
     // finds the last element that isn't a 0 so that we can compress the stack list
     const last_item = if (std.mem.lastIndexOfNone(u8, stack, &.{0})) |last| last + 1 else 0;
     return utils.createSyscallEffect(allocator, .{
-        .tc = tc,
+        .tc = &tc,
         .err = err,
         .err_kind = .UNSPECIFIED,
         .heap = heap,
