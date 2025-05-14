@@ -108,10 +108,12 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // }
 
     // Create execution contexts
-    var tc = try utils.createTransactionContext(
+    var tc: TransactionContext = undefined;
+    try utils.createTransactionContext(
         allocator,
         pb_instr,
         .{},
+        &tc,
     );
     defer utils.deinitTransactionContext(allocator, tc);
     const syscall_registry = try sig.vm.syscalls.register(

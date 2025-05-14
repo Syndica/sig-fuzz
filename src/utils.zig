@@ -13,8 +13,6 @@ const EbpfError = sig.vm.EbpfError;
 const SyscallError = sig.vm.SyscallError;
 const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
-const EpochContext = sig.runtime.transaction_context.EpochContext;
-const SlotContext = sig.runtime.transaction_context.SlotContext;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
 const FeatureSet = sig.runtime.FeatureSet;
@@ -35,7 +33,8 @@ pub fn createTransactionContext(
         epoch_stakes: ?*EpochStakes = null,
         sysvar_cache: ?*SysvarCache = null,
     },
-) !TransactionContext {
+    tc: *TransactionContext,
+) !void {
     const feature_set = if (environment.feature_set) |ptr|
         ptr
     else
@@ -46,7 +45,8 @@ pub fn createTransactionContext(
         ptr
     else
         try allocator.create(EpochStakes);
-    epoch_stakes.* = EpochStakes.EMPTY;
+
+    epoch_stakes.* = try EpochStakes.initEmpty(allocator);
 
     var sysvar_cache = if (environment.sysvar_cache) |ptr|
         ptr
@@ -54,7 +54,7 @@ pub fn createTransactionContext(
         try allocator.create(SysvarCache);
     sysvar_cache.* = try createSysvarCache(allocator, instr_ctx);
 
-    var tc = TransactionContext{
+    tc.* = TransactionContext{
         .allocator = allocator,
         .feature_set = feature_set,
         .epoch_stakes = epoch_stakes,
@@ -85,8 +85,6 @@ pub fn createTransactionContext(
             tc.prev_lamports_per_signature = prev_entry.fee_calculator.lamports_per_signature;
         }
     }
-
-    return tc;
 }
 
 pub fn deinitTransactionContext(

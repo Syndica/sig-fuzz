@@ -69,10 +69,12 @@ export fn sol_compat_instr_execute_v1(
 }
 
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
-    var tc = try utils.createTransactionContext(
+    var tc: TransactionContext = undefined;
+    try utils.createTransactionContext(
         allocator,
         pb_instr_ctx,
         .{},
+        &tc,
     );
     defer utils.deinitTransactionContext(allocator, tc);
 
