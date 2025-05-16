@@ -7,7 +7,7 @@ repo_agave="firedancer-io/solfuzz-agave"
 
 repos=("$repo_agave" "$repo_solfuzz")
 artifacts_agave=("libsolfuzz-agave.so")
-artifacts_solfuzz=("solfuzz-bins")
+artifacts_solfuzz=("solfuzz-bins-regular")
 
 # Associate repos with their corresponding artifacts lists
 declare -A repo_artifacts
