@@ -242,38 +242,34 @@ pub fn createSysvarCache(
     if (std.meta.isError(sysvar_cache.get(sysvar.Clock))) {
         var clock = sysvar.Clock.DEFAULT;
         clock.slot = 10;
-        sysvar_cache.clock = try sig.bincode.writeAlloc(
+        sysvar_cache.clock = try sysvar.serialize(
             allocator,
             clock,
-            .{},
         );
     }
     sysvar_cache.epoch_schedule = try cloneSysvarData(allocator, ctx, sig.core.EpochSchedule.ID);
     if (std.meta.isError(sysvar_cache.get(sysvar.EpochSchedule))) {
-        sysvar_cache.epoch_schedule = try sig.bincode.writeAlloc(
+        sysvar_cache.epoch_schedule = try sysvar.serialize(
             allocator,
             sig.core.EpochSchedule.DEFAULT,
-            .{},
         );
     }
     sysvar_cache.epoch_rewards = try cloneSysvarData(allocator, ctx, sysvar.EpochRewards.ID);
     sysvar_cache.rent = try cloneSysvarData(allocator, ctx, sysvar.Rent.ID);
     if (std.meta.isError(sysvar_cache.get(sysvar.Rent))) {
-        sysvar_cache.rent = sig.bincode.writeAlloc(
+        sysvar_cache.rent = try sysvar.serialize(
             allocator,
             sysvar.Rent.DEFAULT,
-            .{},
-        ) catch null;
+        );
     }
     sysvar_cache.last_restart_slot = try cloneSysvarData(allocator, ctx, sysvar.LastRestartSlot.ID);
     if (std.meta.isError(sysvar_cache.get(sysvar.LastRestartSlot))) {
-        sysvar_cache.last_restart_slot = sig.bincode.writeAlloc(
+        sysvar_cache.last_restart_slot = try sysvar.serialize(
             allocator,
             sysvar.LastRestartSlot{
                 .last_restart_slot = 5000,
             },
-            .{},
-        ) catch null;
+        );
     }
     if (sysvar_cache.slot_hashes == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.SlotHashes.ID)) |slot_hashes_data| {
@@ -304,7 +300,7 @@ pub fn createSysvarCache(
     if (sysvar_cache.fees == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.Fees.ID)) |fees_data| {
             sysvar_cache.fees = sig.bincode.readFromSlice(
-                std.testing.failing_allocator,
+                allocator,
                 sysvar.Fees,
                 fees_data,
                 .{},
