@@ -195,15 +195,15 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         .from_asm = false,
     };
 
-    const parameter_bytes, const regions, const accounts_metadata =
+    var parameter_bytes, var regions, const accounts_metadata =
         try serialize.serializeParameters(
         allocator,
         ic,
         !direct_mapping,
     );
     defer {
-        allocator.free(parameter_bytes);
-        allocator.free(regions);
+        parameter_bytes.deinit(allocator);
+        regions.deinit(allocator);
     }
     tc.serialized_accounts = accounts_metadata;
 
@@ -232,7 +232,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         ),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
-    try mm_regions.appendSlice(allocator, regions);
+    try mm_regions.appendSlice(allocator, regions.items);
     const fixture_input_region_start = mm_regions.items.len;
 
     var input_data_offset: u64 = 0;
