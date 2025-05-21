@@ -125,15 +125,15 @@ fn executeVmTest(
         .enable_instruction_tracing = true,
     };
 
-    const parameter_bytes, const regions, const accounts_metadata =
+    var parameter_bytes, var regions, const accounts_metadata =
         try serialize.serializeParameters(
         allocator,
         &ic,
         !direct_mapping,
     );
     defer {
-        allocator.free(parameter_bytes);
-        allocator.free(regions);
+        parameter_bytes.deinit(allocator);
+        regions.deinit(allocator);
     }
     tc.serialized_accounts = accounts_metadata;
 
@@ -226,7 +226,7 @@ fn executeVmTest(
             0),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
-    try input_memory_regions.appendSlice(allocator, regions);
+    try input_memory_regions.appendSlice(allocator, regions.items);
 
     const map = try memory.MemoryMap.init(
         allocator,
