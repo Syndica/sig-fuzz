@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // we need to build secp256k1 in PIC to link it to the shared object
+    sig.builder.dependency("secp256k1", .{
+        .target = target,
+        .optimize = optimize,
+    }).artifact("secp256k1").root_module.pic = true;
+
     var protoc_step = protobuf.RunProtocStep.create(b, pb.builder, target, .{
         .destination_directory = b.path("src/proto"),
         .source_files = &.{

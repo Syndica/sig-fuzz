@@ -125,12 +125,16 @@ fn executeVmTest(
         .enable_instruction_tracing = true,
     };
 
+    const mask_out_rent_epoch_in_vm_serialization = tc.feature_set.active.contains(
+        features.MASK_OUT_RENT_EPOCH_IN_VM_SERIALIZATION,
+    );
     var parameter_bytes, var regions, const accounts_metadata =
         try serialize.serializeParameters(
-        allocator,
-        &ic,
-        !direct_mapping,
-    );
+            allocator,
+            &ic,
+            !direct_mapping,
+            mask_out_rent_epoch_in_vm_serialization,
+        );
     defer {
         parameter_bytes.deinit(allocator);
         regions.deinit(allocator);
