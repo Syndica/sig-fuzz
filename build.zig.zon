@@ -1,16 +1,18 @@
 .{
-    .name = "sig-fuzz",
+    .name = .sig_fuzz,
     .version = "0.1.0",
     .paths = .{""},
+    .fingerprint = 0xdf162ceee1635531,
+    .minimum_zig_version = "0.14.1",
     .dependencies = .{
         .sig = .{ .path = "sig/" },
-        .pb = .{
-            .url = "git+https://github.com/Rexicon226/zig-protobuf#aa2bd47eccc470817115f40f173bcf42c862dcb8",
-            .hash = "12201db62d80afc3753a9ed731d471f991e3962aa904b9c7cfbfd72d14fa712a9695",
-        },
         .protosol = .{
             .url = "git+https://github.com/firedancer-io/protosol#77618bb8f83d494a41be3934410f793357e86b18",
-            .hash = "1220e86a40dc2bea56ea0f75343f7dab075ed95504bb68993b61f95d1923bf1c76c9",
+            .hash = "N-V-__8AAM2RAADoakDcK-pW6g91ND99qwde2VUEu2iZO2H5",
+        },
+        .pb = .{
+            .url = "git+https://github.com/Rexicon226/zig-protobuf#3fae05b4ffd4f49096d26c55ab037a182fb5c8cd",
+            .hash = "protobuf-2.0.0-0e82aiKcGwB7froXiOrluxDW7KX5S_iYGEFbvcq1mx1O",
         },
     },
 }

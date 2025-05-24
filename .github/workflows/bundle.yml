@@ -20,9 +20,9 @@ jobs:
           path: sig/
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
         with:
-          version: 0.13.0
+          version: 0.14.1
 
       - name: Build sig-fuzz
         run: zig build -Dcpu=haswell -Doptimize=ReleaseSafe --summary all

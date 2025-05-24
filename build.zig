@@ -10,17 +10,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .@"enable-tsan" = false,
         .blockstore = .hashmap,
+        .force_pic = true,
     });
     const pb = b.dependency("pb", .{
         .target = target,
         .optimize = optimize,
     });
-
-    // we need to build secp256k1 in PIC to link it to the shared object
-    sig.builder.dependency("secp256k1", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("secp256k1").root_module.pic = true;
 
     var protoc_step = protobuf.RunProtocStep.create(b, pb.builder, target, .{
         .destination_directory = b.path("src/proto"),
@@ -32,25 +27,21 @@ pub fn build(b: *std.Build) void {
         .include_directories = &.{"protosol/proto"},
     });
 
-    const test_exe = b.addTest(.{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    test_exe.root_module.addImport("protobuf", pb.module("protobuf"));
-    test_exe.root_module.addImport("sig", sig.module("sig"));
-    const test_step = b.step("test", "");
-    test_step.dependOn(&b.addRunArtifact(test_exe).step);
-
-    const lib = b.addSharedLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "solfuzz_sig",
-        .target = target,
-        .optimize = optimize,
-        .root_source_file = b.path("src/lib.zig"),
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+            .omit_frame_pointer = false,
+            .imports = &.{
+                .{ .name = "sig", .module = sig.module("sig") },
+                .{ .name = "protobuf", .module = pb.module("protobuf") },
+            },
+        }),
     });
-    lib.root_module.omit_frame_pointer = false;
-    lib.root_module.addImport("sig", sig.module("sig"));
-    lib.root_module.addImport("protobuf", pb.module("protobuf"));
+    lib.sanitize_coverage_trace_pc_guard = true;
     lib.step.dependOn(&protoc_step.step);
     b.installArtifact(lib);
 }
