@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addLibrary(.{
         .name = "solfuzz_sig",
-        .linkage = .static,
+        .linkage = .dynamic,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = target,
