@@ -41,8 +41,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    // seems that fuzzcorp doesn't support it yet?
-    // lib.sanitize_coverage_trace_pc_guard = true; 
+
+    lib.root_module.fuzz = true;
     lib.step.dependOn(&protoc_step.step);
     b.installArtifact(lib);
 }
