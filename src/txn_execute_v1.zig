@@ -67,23 +67,278 @@ export fn sol_compat_txn_execute_v1(
     return 1;
 }
 
+const FeeRateGovernor = sig.core.FeeRateGovernor;
+const GenesisConfig = sig.core.GenesisConfig;
+const Inflation = sig.core.Inflation;
+const PohConfig = sig.core.PohConfig;
+const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
+const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
+const TransactionExecutionConfig = sig.runtime.transaction_execution.TransactionExecutionConfig;
+const BatchAccountCache = sig.runtime.account_loader.BatchAccountCache;
+const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecuteTransaction;
+
+/// feature_set: FeatureSet <- Toggle Direct Mapping <- TxnContext.EpochContext.Features
+/// fee_collector: Pubkey <- Pubkey::new_unique()
+/// slot: u64 <- TxnContext.SlotContext.Slot | 10
+/// rent: Rent <- TxnContext.[]Accounts.Rent | Rent::default()
+/// epoch_schedule: EpochSchedule <- TxnContext[]Accounts.EpochSchedule | EpochSchedule::default()
+/// genesis_config: GenesisConfig <- GenesisConfig.accounts.add(alut.id & config.id) <- GenesisConfig{creation_time: 0, rent, epoch_schedule, ..default()})
+/// blockhashqueue: BlockhashQueue <- TxnContext.BlockhashQueue | [[[0; 32]]]
+/// genesis_hash: Hash <- blockhashqueue.root()
+///
+/// bank_forks: BankForks <- BankForks::new_rc_arc( Bank::new_with_paths(...))
+/// bank: Bank <- bank_forks.root()
+/// account_keys: []Pubkey <- TxnContext.SanitizedTransaction.TransactionMessage.[]Pubkey
+/// lamports_per_signature: u64 <- TxnContext[]Accounts.RecentBlockhashes.lamports_per_signature | None
+/// message: TransactionMessage <- build_versioned_message(TxnContext.SantizedTransaction.TransactionMessage)
+/// signatures: []Signature <- TxnContext.SanitizedTransaction.Signatures
+/// versioned_transaction: VersionedTransaction <- VersionedTransaction{signatures, transactions}
+/// sanitized_transaction: SanitizedTransaction <- bank.verify(versioned_transaction)
+/// batch: TransactionBatch <- bank.prepare_sanitized_batch([sanitized_transactin])
+/// recording_config
+/// timings
+/// config
+/// metrics
+/// result: TransactionProcessingResult <- bank.load_and_execute_transactions(batch, ...)
+/// txn_result: TxnResult <- convert result to TxnResult
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
-    // const features = try utils.createFeatureSet(allocator, pb_txn_ctx.epoch_ctx.?.features);
+    var prng = std.Random.DefaultPrng.init(0);
+
+    const feature_set = try utils.createFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
+    defer feature_set.deinit(allocator);
+
+    // TODO: Toggle direct mapping
+
+    const fee_collector = Pubkey.initRandom(prng.random());
+    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else 10;
+
+    const rent = (try loadSysvar(
+        allocator,
+        sysvar.Rent,
+        pb_txn_ctx.account_shared_data,
+    )) orelse sysvar.Rent.DEFAULT;
+
+    const epoch_schedule = (try loadSysvar(
+        allocator,
+        sysvar.EpochSchedule,
+        pb_txn_ctx.account_shared_data,
+    )) orelse sysvar.EpochSchedule.DEFAULT;
+
+    var genesis_config = GenesisConfig.default(allocator);
+    defer genesis_config.deinit(allocator);
+
+    genesis_config.creation_time = 0;
+    genesis_config.rent = rent;
+    genesis_config.epoch_schedule = epoch_schedule;
+
+    try genesis_config.accounts.put(sig.runtime.program.address_lookup_table.ID, .{
+        .data = .initEmpty(0),
+        .executable = false,
+        .owner = sig.runtime.program.bpf_loader.v3.ID,
+        .lamports = 1,
+        .rent_epoch = 0,
+    });
+
+    try genesis_config.accounts.put(sig.runtime.program.config.ID, .{
+        .data = .initEmpty(0),
+        .executable = false,
+        .owner = sig.runtime.program.bpf_loader.v3.ID,
+        .lamports = 1,
+        .rent_epoch = 0,
+    });
+
+    var blockhashes = std.ArrayList(Hash).init(allocator);
+    defer blockhashes.deinit();
+
+    for (pb_txn_ctx.blockhash_queue.items) |pb_blockhash| {
+        const blockhash = Hash{ .data = pb_blockhash.getSlice()[0..Hash.SIZE].* };
+        try blockhashes.append(blockhash);
+    }
+
+    if (blockhashes.items.len == 0) try blockhashes.append(Hash.ZEROES);
+
+    const genesis_hash = blockhashes.items[0];
+
+    // TODO: Analogous Bank setup
+
     _ = emit_logs;
+    _ = fee_collector;
+    _ = slot;
+    _ = genesis_hash;
 
-    // const result = executor.executeTransactionBatch();
-
-    const msg_hash, const transaction = try parseSanitizedTransaction(
+    const msg_hash, const sanitized_transaction = try parseSanitizedTransaction(
         allocator,
         pb_txn_ctx.tx.?,
     );
-    transaction.deinit(allocator);
-    _ = msg_hash;
+    defer sanitized_transaction.deinit(allocator);
 
-    // bank.verify_transaction(...)
-    // transaction.verify() catch |err| {
-    //     _ = err;
-    // };
+    // TODO: Replay Verify Transaction producing a RuntimeTransaction
+
+    // Genesis Config -> Default(context epoch schedule, context rent, ...)
+    //     - Add dummy ALUT and Config accounts to genesis config initial accounts
+    // Genesis Hash -> Root of context blockhash queue
+
+    var batch_account_cache = BatchAccountCache{};
+
+    const environment = TransactionExecutionEnvironment{
+        .ancestors = undefined,
+        .feature_set = &feature_set,
+        .status_cache = undefined,
+        .sysvar_cache = undefined,
+        .rent_collector = undefined,
+        .blockhash_queue = undefined,
+        .epoch_stakes = undefined,
+
+        .max_age = undefined,
+        .last_blockhash = undefined,
+        .next_durable_nonce = undefined,
+        .next_lamports_per_signature = undefined,
+        .last_lamports_per_signature = undefined,
+        .lamports_per_signature = undefined,
+    };
+
+    const config = TransactionExecutionConfig{
+        .log = false,
+        .log_messages_byte_limit = null,
+    };
+
+    const runtime_transaction = RuntimeTransaction{
+        .signature_count = undefined,
+        .fee_payer = undefined,
+        .msg_hash = msg_hash,
+        .recent_blockhash = sanitized_transaction.msg.recent_blockhash,
+        .instruction_infos = undefined,
+        .accounts = undefined,
+    };
+
+    const result = try loadAndExecuteTransaction(
+        allocator,
+        &runtime_transaction,
+        &batch_account_cache,
+        &environment,
+        &config,
+    );
+
+    switch (result) {
+        .ok => |transaction| {
+            _ = transaction;
+            // let is_ok = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => {
+            //         executed_tx.execution_details.status.is_ok()
+            //     }
+            //     ProcessedTransaction::FeesOnly(_) => false,
+            // };
+
+            // let loaded_accounts_data_size = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => {
+            //         executed_tx.loaded_transaction.loaded_accounts_data_size
+            //     }
+            //     ProcessedTransaction::FeesOnly(fees_only_tx) => {
+            //         fees_only_tx.rollback_accounts.data_size() as u32
+            //     }
+            // };
+
+            // let (status, instr_err, custom_err, instr_err_idx) =
+            //     match txn.status().as_ref().map_err(transaction_error_to_err_nums) {
+            //         Ok(_) => (0, 0, 0, 0),
+            //         Err((status, instr_err, custom_err, instr_err_idx)) => {
+            //             // Set custom err to 0 if the failing instruction is a precompile
+            //             let custom_err_ret = sanitized_message
+            //                 .instructions()
+            //                 .get(instr_err_idx as usize)
+            //                 .and_then(|instr| {
+            //                     sanitized_message
+            //                         .account_keys()
+            //                         .get(instr.program_id_index as usize)
+            //                         .map(|program_id| {
+            //                             if get_precompile(program_id, |_| true).is_some() {
+            //                                 0
+            //                             } else {
+            //                                 custom_err
+            //                             }
+            //                         })
+            //                 })
+            //                 .unwrap_or(custom_err);
+            //             (status, instr_err, custom_err_ret, instr_err_idx)
+            //         }
+            //     };
+            // let rent = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => executed_tx.loaded_transaction.rent,
+            //     ProcessedTransaction::FeesOnly(_) => 0,
+            // };
+            // let resulting_state: Option<ResultingState> = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => {
+            //         Some(executed_tx.loaded_transaction.clone().into())
+            //     }
+            //     ProcessedTransaction::FeesOnly(tx) => {
+            //         let mut accounts = Vec::with_capacity(tx.rollback_accounts.count());
+            //         collect_accounts_for_failed_tx(
+            //             &mut accounts,
+            //             &mut None,
+            //             sanitized_message,
+            //             None,
+            //             &tx.rollback_accounts,
+            //         );
+            //         Some(ResultingState {
+            //             acct_states: accounts
+            //                 .iter()
+            //                 .map(|&(pubkey, acct)| (*pubkey, acct.clone()).into())
+            //                 .collect(),
+            //             rent_debits: vec![],
+            //             transaction_rent: 0,
+            //         })
+            //     }
+            // };
+            // let executed_units = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => {
+            //         executed_tx.execution_details.executed_units
+            //     }
+            //     ProcessedTransaction::FeesOnly(_) => 0,
+            // };
+            // let return_data = match txn {
+            //     ProcessedTransaction::Executed(executed_tx) => executed_tx
+            //         .execution_details
+            //         .return_data
+            //         .as_ref()
+            //         .map(|info| info.clone().data)
+            //         .unwrap_or_default(),
+            //     ProcessedTransaction::FeesOnly(_) => vec![],
+            // };
+            // (
+            //     is_ok,
+            //     false,
+            //     status,
+            //     instr_err,
+            //     instr_err_idx,
+            //     custom_err,
+            //     executed_units,
+            //     return_data,
+            //     Some(txn.fee_details()),
+            //     rent,
+            //     loaded_accounts_data_size,
+            //     resulting_state,
+            // )
+        },
+        .err => |err| {
+            _ = err;
+            // let (status, instr_err, custom_err, instr_err_idx) =
+            //     transaction_error_to_err_nums(transaction_error);
+            // (
+            //     false,
+            //     true,
+            //     status,
+            //     instr_err,
+            //     instr_err_idx,
+            //     custom_err,
+            //     0,
+            //     vec![],
+            //     None,
+            //     0,
+            //     0,
+            //     None,
+            // )
+        },
+    }
 
     return pb.TxnResult{
         .executed = false,
@@ -105,218 +360,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     };
 }
 
-// pub const TransactionWithMeta = struct {
-//     // The base transaction
-//     transaction: *const Transaction,
-
-//     // The accounts from txn
-//     accounts: std.MultiArrayList(struct { key: Pubkey, writeable: bool }),
-
-//     pub fn deinit(self: *TransactionWithMeta, allocator: *std.mem.Allocator) void {
-//         self.transaction.deinit(allocator);
-//         self.accounts.deinit(allocator);
-//     }
-// };
-
-// pub fn createAccounts(
-//     allocator: std.mem.Allocator,
-//     transaction: *const Transaction,
-//     loaded_writable_accounts: []const Pubkey,
-//     loaded_readonly_accounts: []const Pubkey,
-// ) error{OutOfMemory}!std.MultiArrayList(struct { key: Pubkey, writeable: bool }) {
-//     const num_txn = transaction.msg.account_keys.len;
-//     const num_loaded_writable = loaded_writable_accounts.len;
-//     const num_loaded_readonly = loaded_readonly_accounts.len;
-
-//     const num_signed_accounts = transaction.msg.signature_count;
-//     const num_readonly_signed_accounts = transaction.msg.readonly_signed_count;
-//     const num_readonly_unsigned_accounts = transaction.msg.readonly_unsigned_count;
-
-//     const accounts_len = transaction.msg.account_keys.len +
-//         loaded_writable_accounts.len +
-//         loaded_readonly_accounts.len;
-
-//     const accounts = std.MultiArrayList(struct { key: Pubkey, writeable: bool }){};
-//     try accounts.ensureTotalCapacity(
-//         allocator,
-//         accounts_len,
-//     );
-
-//     for (pubkeys, 0..) |pubkey, index| {
-//         if (index >= num_txn) {
-//             accounts.appendAssumeCapacity(.{
-//                 pubkey,
-//                 index - num_txn < num_loaded_writable,
-//             });
-//         } else if (index >= num_signed_accounts) {
-//             const num_unsigned_accounts = num_txn - num_signed_accounts;
-//             const num_writable_unsigned_accounts = num_unsigned_accounts - num_readonly_unsigned_accounts;
-//             accounts.appendAssumeCapacity(.{
-//                 pubkey,
-//                 index - num_signed_accounts < num_writable_unsigned_accounts,
-//             });
-//         }
-//     }
-// }
-
-pub const TransactionError = error{
-    /// An account is already being processed in another transaction in a way
-    /// that does not support parallelism
-    AccountInUse,
-
-    /// A `Pubkey` appears twice in the transaction's `account_keys`.  Instructions can reference
-    /// `Pubkey`s more than once but the message must contain a list with no duplicate keys
-    AccountLoadedTwice,
-
-    /// Attempt to debit an account but found no record of a prior credit.
-    AccountNotFound,
-
-    /// Attempt to load a program that does not exist
-    ProgramAccountNotFound,
-
-    /// The from `Pubkey` does not have sufficient balance to pay the fee to schedule the transaction
-    InsufficientFundsForFee,
-
-    /// This account may not be used to pay transaction fees
-    InvalidAccountForFee,
-
-    /// The bank has seen this transaction before. This can occur under normal operation
-    /// when a UDP packet is duplicated, as a user error from a client not updating
-    /// its `recent_blockhash`, or as a double-spend attack.
-    AlreadyProcessed,
-
-    /// The bank has not seen the given `recent_blockhash` or the transaction is too old and
-    /// the `recent_blockhash` has been discarded.
-    BlockhashNotFound,
-
-    /// An error occurred while processing an instruction. The first element of the tuple
-    /// indicates the instruction index in which the error occurred.
-    InstructionError, // struct { instruction_index: u8, err: InstructionError },
-
-    /// Loader call chain is too deep
-    CallChainTooDeep,
-
-    /// Transaction requires a fee but has no signature present
-    MissingSignatureForFee,
-
-    /// Transaction contains an invalid account reference
-    InvalidAccountIndex,
-
-    /// Transaction did not pass signature verification
-    SignatureFailure,
-
-    /// This program may not be used for executing instructions
-    InvalidProgramForExecution,
-
-    /// Transaction failed to sanitize accounts offsets correctly
-    /// implies that account locks are not taken for this TX, and should
-    /// not be unlocked.
-    SanitizeFailure,
-
-    ClusterMaintenance,
-
-    /// Transaction processing left an account with an outstanding borrowed reference
-    AccountBorrowOutstanding,
-
-    /// Transaction would exceed max Block Cost Limit
-    WouldExceedMaxBlockCostLimit,
-
-    /// Transaction version is unsupported
-    UnsupportedVersion,
-
-    /// Transaction loads a writable account that cannot be written
-    InvalidWritableAccount,
-
-    /// Transaction would exceed max account limit within the block
-    WouldExceedMaxAccountCostLimit,
-
-    /// Transaction would exceed account data limit within the block
-    WouldExceedAccountDataBlockLimit,
-
-    /// Transaction locked too many accounts
-    TooManyAccountLocks,
-
-    /// Address lookup table not found
-    AddressLookupTableNotFound,
-
-    /// Attempted to lookup addresses from an account owned by the wrong program
-    InvalidAddressLookupTableOwner,
-
-    /// Attempted to lookup addresses from an invalid account
-    InvalidAddressLookupTableData,
-
-    /// Address table lookup uses an invalid index
-    InvalidAddressLookupTableIndex,
-
-    /// Transaction leaves an account with a lower balance than rent-exempt minimum
-    InvalidRentPayingAccount,
-
-    /// Transaction would exceed max Vote Cost Limit
-    WouldExceedMaxVoteCostLimit,
-
-    /// Transaction would exceed total account data limit
-    WouldExceedAccountDataTotalLimit,
-
-    /// Transaction contains a duplicate instruction that is not allowed
-    DuplicateInstruction, // u8,
-
-    /// Transaction results in an account with insufficient funds for rent
-    InsufficientFundsForRent, // struct { account_index: u8 },
-
-    /// Transaction exceeded max loaded accounts data size cap
-    MaxLoadedAccountsDataSizeExceeded,
-
-    /// LoadedAccountsDataSizeLimit set for transaction must be greater than 0.
-    InvalidLoadedAccountsDataSizeLimit,
-
-    /// Sanitized transaction differed before/after feature activiation. Needs to be resanitized.
-    ResanitizationNeeded,
-
-    /// Program execution is temporarily restricted on an account.
-    ProgramExecutionTemporarilyRestricted, // struct { account_index: u8 },
-};
-
-pub fn intFromTransactionError(err: TransactionError) u32 {
-    return switch (err) {
-        error.AccountInUse => 1,
-        error.AccountLoadedTwice => 2,
-        error.AccountNotFound => 3,
-        error.ProgramAccountNotFound => 4,
-        error.InsufficientFundsForFee => 5,
-        error.InvalidAccountForFee => 6,
-        error.AlreadyProcessed => 7,
-        error.BlockhashNotFound => 8,
-        error.InstructionError => 9,
-        error.CallChainTooDeep => 10,
-        error.MissingSignatureForFee => 11,
-        error.InvalidAccountIndex => 12,
-        error.SignatureFailure => 13,
-        error.InvalidProgramForExecution => 14,
-        error.SanitizeFailure => 15,
-        error.ClusterMaintenance => 16,
-        error.AccountBorrowOutstanding => 17,
-        error.WouldExceedMaxBlockCostLimit => 18,
-        error.UnsupportedVersion => 19,
-        error.InvalidWritableAccount => 21,
-        error.WouldExceedMaxAccountCostLimit => 22,
-        error.WouldExceedAccountDataBlockLimit => 23,
-        error.TooManyAccountLocks => 24,
-        error.AddressLookupTableNotFound => 25,
-        error.InvalidAddressLookupTableOwner => 26,
-        error.InvalidAddressLookupTableData => 27,
-        error.InvalidAddressLookupTableIndex => 28,
-        error.InvalidRentPayingAccount => 29,
-        error.WouldExceedMaxVoteCostLimit => 30,
-        error.WouldExceedAccountDataTotalLimit => 31,
-        error.DuplicateInstruction => 32,
-        error.InsufficientFundsForRent => 33,
-        error.MaxLoadedAccountsDataSizeExceeded => 34,
-        error.InvalidLoadedAccountsDataSizeLimit => 35,
-        error.ResanitizationNeeded => 36,
-        error.ProgramExecutionTemporarilyRestricted => 37,
-    };
-}
-
 const Hash = sig.core.Hash;
 const Signature = sig.core.Signature;
 const Transaction = sig.core.Transaction;
@@ -324,6 +367,15 @@ const TransactionVersion = sig.core.transaction.TransactionVersion;
 const TransactionMessage = sig.core.transaction.TransactionMessage;
 const TransactionInstruction = sig.core.transaction.TransactionInstruction;
 const TransactionAddressLookup = sig.core.transaction.TransactionAddressLookup;
+
+fn loadSysvar(allocator: std.mem.Allocator, comptime T: type, accounts: std.ArrayList(pb.AcctState)) !?T {
+    for (accounts.items) |acc| {
+        if (std.mem.eql(u8, acc.address.getSlice(), &T.ID.data) and acc.lamports > 0) {
+            return try sig.bincode.readFromSlice(allocator, T, acc.data.getSlice(), .{});
+        }
+    }
+    return null;
+}
 
 fn parseSanitizedTransaction(
     allocator: std.mem.Allocator,
