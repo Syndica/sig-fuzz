@@ -71,6 +71,7 @@ const FeeRateGovernor = sig.core.FeeRateGovernor;
 const GenesisConfig = sig.core.GenesisConfig;
 const Inflation = sig.core.Inflation;
 const PohConfig = sig.core.PohConfig;
+const SysvarCache = sig.runtime.SysvarCache;
 const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
 const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
 const TransactionExecutionConfig = sig.runtime.transaction_execution.TransactionExecutionConfig;
@@ -102,7 +103,16 @@ const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecu
 /// result: TransactionProcessingResult <- bank.load_and_execute_transactions(batch, ...)
 /// txn_result: TxnResult <- convert result to TxnResult
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
-    var prng = std.Random.DefaultPrng.init(0);
+    errdefer |err| {
+        std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
+        if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
+    }
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(&pb_txn_ctx))[0..@sizeOf(pb.TxnContext)];
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update(bytes);
+    var seed = Hash.ZEROES;
+    hasher.final(&seed.data);
+    var prng = std.Random.DefaultPrng.init(std.mem.bytesAsValue(u64, seed.data[0..8]).*);
 
     const feature_set = try utils.createFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
     defer feature_set.deinit(allocator);
@@ -159,12 +169,53 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     const genesis_hash = blockhashes.items[0];
 
-    // TODO: Analogous Bank setup
+    const snapshot_dir_name = try std.fmt.allocPrint(
+        allocator,
+        "snapshot-dir-{}",
+        .{prng.random().int(u64)},
+    );
+    defer allocator.free(snapshot_dir_name);
+    try std.fs.cwd().makeDir(snapshot_dir_name);
+    defer std.fs.cwd().deleteTree(snapshot_dir_name) catch {};
+    const snapshot_dir = try std.fs.cwd().openDir(
+        snapshot_dir_name,
+        .{ .iterate = true },
+    );
 
-    _ = emit_logs;
-    _ = fee_collector;
-    _ = slot;
-    _ = genesis_hash;
+    var accounts_db = try sig.accounts_db.AccountsDB.init(.{
+        .allocator = allocator,
+        .logger = .noop,
+        .snapshot_dir = snapshot_dir,
+        .geyser_writer = null,
+        .gossip_view = null,
+        .index_allocation = .ram,
+        .number_of_index_shards = 1,
+        .buffer_pool_frames = 1024,
+    });
+    defer accounts_db.deinit();
+
+    const accounts = try allocator.alloc(sig.core.Account, pb_txn_ctx.account_shared_data.items.len);
+    defer allocator.free(accounts);
+    const keys = try allocator.alloc(Pubkey, pb_txn_ctx.account_shared_data.items.len);
+    defer allocator.free(keys);
+    for (pb_txn_ctx.account_shared_data.items, 0..) |account, i| {
+        accounts[i] = .{
+            .data = .initAllocated(account.data.getSlice()),
+            .executable = account.executable,
+            .owner = Pubkey{ .data = account.owner.getSlice()[0..Pubkey.SIZE].* },
+            .lamports = account.lamports,
+            .rent_epoch = account.rent_epoch,
+        };
+        keys[i] = Pubkey{ .data = account.address.getSlice()[0..Pubkey.SIZE].* };
+    }
+
+    try accounts_db.putAccountSlice(
+        accounts,
+        keys,
+        slot,
+    );
+
+    // TODO: Analogous Bank setup
 
     const msg_hash, const sanitized_transaction = try parseSanitizedTransaction(
         allocator,
@@ -172,173 +223,185 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer sanitized_transaction.deinit(allocator);
 
+    _ = emit_logs;
+    _ = fee_collector;
+    _ = genesis_hash;
+    _ = msg_hash;
+
     // TODO: Replay Verify Transaction producing a RuntimeTransaction
 
     // Genesis Config -> Default(context epoch schedule, context rent, ...)
     //     - Add dummy ALUT and Config accounts to genesis config initial accounts
     // Genesis Hash -> Root of context blockhash queue
 
-    var batch_account_cache = BatchAccountCache{};
+    // var batch_account_cache = BatchAccountCache{};
+    // var sysvar_cache = SysvarCache{};
+    // const environment = TransactionExecutionEnvironment{
+    //     .ancestors = undefined,
+    //     .feature_set = &feature_set,
+    //     .status_cache = undefined,
+    //     .sysvar_cache = undefined,
+    //     .rent_collector = undefined,
+    //     .blockhash_queue = undefined,
+    //     .epoch_stakes = undefined,
 
-    const environment = TransactionExecutionEnvironment{
-        .ancestors = undefined,
-        .feature_set = &feature_set,
-        .status_cache = undefined,
-        .sysvar_cache = undefined,
-        .rent_collector = undefined,
-        .blockhash_queue = undefined,
-        .epoch_stakes = undefined,
+    //     .max_age = undefined,
+    //     .last_blockhash = undefined,
+    //     .next_durable_nonce = undefined,
+    //     .next_lamports_per_signature = undefined,
+    //     .last_lamports_per_signature = undefined,
+    //     .lamports_per_signature = undefined,
+    // };
 
-        .max_age = undefined,
-        .last_blockhash = undefined,
-        .next_durable_nonce = undefined,
-        .next_lamports_per_signature = undefined,
-        .last_lamports_per_signature = undefined,
-        .lamports_per_signature = undefined,
-    };
+    // const config = TransactionExecutionConfig{
+    //     .log = true,
+    //     .log_messages_byte_limit = null,
+    //     // .account_overrides: None,
+    //     // .compute_budget: bank.compute_budget(),
+    //     // .log_messages_bytes_limit: None,
+    //     // .limit_to_load_programs: true,
+    //     // .recording_config,
+    //     // .transaction_account_lock_limit: None,
+    //     // .check_program_modification_slot: false,
+    // };
 
-    const config = TransactionExecutionConfig{
-        .log = false,
-        .log_messages_byte_limit = null,
-    };
+    // const runtime_transaction = RuntimeTransaction{
+    //     .signature_count = undefined,
+    //     .fee_payer = undefined,
+    //     .msg_hash = msg_hash,
+    //     .recent_blockhash = sanitized_transaction.msg.recent_blockhash,
+    //     .instruction_infos = undefined,
+    //     .accounts = undefined,
+    // };
 
-    const runtime_transaction = RuntimeTransaction{
-        .signature_count = undefined,
-        .fee_payer = undefined,
-        .msg_hash = msg_hash,
-        .recent_blockhash = sanitized_transaction.msg.recent_blockhash,
-        .instruction_infos = undefined,
-        .accounts = undefined,
-    };
+    // const result = try loadAndExecuteTransaction(
+    //     allocator,
+    //     &runtime_transaction,
+    //     &batch_account_cache,
+    //     &environment,
+    //     &config,
+    // );
 
-    const result = try loadAndExecuteTransaction(
-        allocator,
-        &runtime_transaction,
-        &batch_account_cache,
-        &environment,
-        &config,
-    );
+    // switch (result) {
+    //     .ok => |transaction| {
+    //         _ = transaction;
+    //         // let is_ok = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => {
+    //         //         executed_tx.execution_details.status.is_ok()
+    //         //     }
+    //         //     ProcessedTransaction::FeesOnly(_) => false,
+    //         // };
 
-    switch (result) {
-        .ok => |transaction| {
-            _ = transaction;
-            // let is_ok = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => {
-            //         executed_tx.execution_details.status.is_ok()
-            //     }
-            //     ProcessedTransaction::FeesOnly(_) => false,
-            // };
+    //         // let loaded_accounts_data_size = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => {
+    //         //         executed_tx.loaded_transaction.loaded_accounts_data_size
+    //         //     }
+    //         //     ProcessedTransaction::FeesOnly(fees_only_tx) => {
+    //         //         fees_only_tx.rollback_accounts.data_size() as u32
+    //         //     }
+    //         // };
 
-            // let loaded_accounts_data_size = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => {
-            //         executed_tx.loaded_transaction.loaded_accounts_data_size
-            //     }
-            //     ProcessedTransaction::FeesOnly(fees_only_tx) => {
-            //         fees_only_tx.rollback_accounts.data_size() as u32
-            //     }
-            // };
-
-            // let (status, instr_err, custom_err, instr_err_idx) =
-            //     match txn.status().as_ref().map_err(transaction_error_to_err_nums) {
-            //         Ok(_) => (0, 0, 0, 0),
-            //         Err((status, instr_err, custom_err, instr_err_idx)) => {
-            //             // Set custom err to 0 if the failing instruction is a precompile
-            //             let custom_err_ret = sanitized_message
-            //                 .instructions()
-            //                 .get(instr_err_idx as usize)
-            //                 .and_then(|instr| {
-            //                     sanitized_message
-            //                         .account_keys()
-            //                         .get(instr.program_id_index as usize)
-            //                         .map(|program_id| {
-            //                             if get_precompile(program_id, |_| true).is_some() {
-            //                                 0
-            //                             } else {
-            //                                 custom_err
-            //                             }
-            //                         })
-            //                 })
-            //                 .unwrap_or(custom_err);
-            //             (status, instr_err, custom_err_ret, instr_err_idx)
-            //         }
-            //     };
-            // let rent = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => executed_tx.loaded_transaction.rent,
-            //     ProcessedTransaction::FeesOnly(_) => 0,
-            // };
-            // let resulting_state: Option<ResultingState> = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => {
-            //         Some(executed_tx.loaded_transaction.clone().into())
-            //     }
-            //     ProcessedTransaction::FeesOnly(tx) => {
-            //         let mut accounts = Vec::with_capacity(tx.rollback_accounts.count());
-            //         collect_accounts_for_failed_tx(
-            //             &mut accounts,
-            //             &mut None,
-            //             sanitized_message,
-            //             None,
-            //             &tx.rollback_accounts,
-            //         );
-            //         Some(ResultingState {
-            //             acct_states: accounts
-            //                 .iter()
-            //                 .map(|&(pubkey, acct)| (*pubkey, acct.clone()).into())
-            //                 .collect(),
-            //             rent_debits: vec![],
-            //             transaction_rent: 0,
-            //         })
-            //     }
-            // };
-            // let executed_units = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => {
-            //         executed_tx.execution_details.executed_units
-            //     }
-            //     ProcessedTransaction::FeesOnly(_) => 0,
-            // };
-            // let return_data = match txn {
-            //     ProcessedTransaction::Executed(executed_tx) => executed_tx
-            //         .execution_details
-            //         .return_data
-            //         .as_ref()
-            //         .map(|info| info.clone().data)
-            //         .unwrap_or_default(),
-            //     ProcessedTransaction::FeesOnly(_) => vec![],
-            // };
-            // (
-            //     is_ok,
-            //     false,
-            //     status,
-            //     instr_err,
-            //     instr_err_idx,
-            //     custom_err,
-            //     executed_units,
-            //     return_data,
-            //     Some(txn.fee_details()),
-            //     rent,
-            //     loaded_accounts_data_size,
-            //     resulting_state,
-            // )
-        },
-        .err => |err| {
-            _ = err;
-            // let (status, instr_err, custom_err, instr_err_idx) =
-            //     transaction_error_to_err_nums(transaction_error);
-            // (
-            //     false,
-            //     true,
-            //     status,
-            //     instr_err,
-            //     instr_err_idx,
-            //     custom_err,
-            //     0,
-            //     vec![],
-            //     None,
-            //     0,
-            //     0,
-            //     None,
-            // )
-        },
-    }
+    //         // let (status, instr_err, custom_err, instr_err_idx) =
+    //         //     match txn.status().as_ref().map_err(transaction_error_to_err_nums) {
+    //         //         Ok(_) => (0, 0, 0, 0),
+    //         //         Err((status, instr_err, custom_err, instr_err_idx)) => {
+    //         //             // Set custom err to 0 if the failing instruction is a precompile
+    //         //             let custom_err_ret = sanitized_message
+    //         //                 .instructions()
+    //         //                 .get(instr_err_idx as usize)
+    //         //                 .and_then(|instr| {
+    //         //                     sanitized_message
+    //         //                         .account_keys()
+    //         //                         .get(instr.program_id_index as usize)
+    //         //                         .map(|program_id| {
+    //         //                             if get_precompile(program_id, |_| true).is_some() {
+    //         //                                 0
+    //         //                             } else {
+    //         //                                 custom_err
+    //         //                             }
+    //         //                         })
+    //         //                 })
+    //         //                 .unwrap_or(custom_err);
+    //         //             (status, instr_err, custom_err_ret, instr_err_idx)
+    //         //         }
+    //         //     };
+    //         // let rent = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => executed_tx.loaded_transaction.rent,
+    //         //     ProcessedTransaction::FeesOnly(_) => 0,
+    //         // };
+    //         // let resulting_state: Option<ResultingState> = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => {
+    //         //         Some(executed_tx.loaded_transaction.clone().into())
+    //         //     }
+    //         //     ProcessedTransaction::FeesOnly(tx) => {
+    //         //         let mut accounts = Vec::with_capacity(tx.rollback_accounts.count());
+    //         //         collect_accounts_for_failed_tx(
+    //         //             &mut accounts,
+    //         //             &mut None,
+    //         //             sanitized_message,
+    //         //             None,
+    //         //             &tx.rollback_accounts,
+    //         //         );
+    //         //         Some(ResultingState {
+    //         //             acct_states: accounts
+    //         //                 .iter()
+    //         //                 .map(|&(pubkey, acct)| (*pubkey, acct.clone()).into())
+    //         //                 .collect(),
+    //         //             rent_debits: vec![],
+    //         //             transaction_rent: 0,
+    //         //         })
+    //         //     }
+    //         // };
+    //         // let executed_units = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => {
+    //         //         executed_tx.execution_details.executed_units
+    //         //     }
+    //         //     ProcessedTransaction::FeesOnly(_) => 0,
+    //         // };
+    //         // let return_data = match txn {
+    //         //     ProcessedTransaction::Executed(executed_tx) => executed_tx
+    //         //         .execution_details
+    //         //         .return_data
+    //         //         .as_ref()
+    //         //         .map(|info| info.clone().data)
+    //         //         .unwrap_or_default(),
+    //         //     ProcessedTransaction::FeesOnly(_) => vec![],
+    //         // };
+    //         // (
+    //         //     is_ok,
+    //         //     false,
+    //         //     status,
+    //         //     instr_err,
+    //         //     instr_err_idx,
+    //         //     custom_err,
+    //         //     executed_units,
+    //         //     return_data,
+    //         //     Some(txn.fee_details()),
+    //         //     rent,
+    //         //     loaded_accounts_data_size,
+    //         //     resulting_state,
+    //         // )
+    //     },
+    //     .err => |err| {
+    //         _ = err;
+    //         // let (status, instr_err, custom_err, instr_err_idx) =
+    //         //     transaction_error_to_err_nums(transaction_error);
+    //         // (
+    //         //     false,
+    //         //     true,
+    //         //     status,
+    //         //     instr_err,
+    //         //     instr_err_idx,
+    //         //     custom_err,
+    //         //     0,
+    //         //     vec![],
+    //         //     None,
+    //         //     0,
+    //         //     0,
+    //         //     None,
+    //         // )
+    //     },
+    // }
 
     return pb.TxnResult{
         .executed = false,
@@ -381,9 +444,14 @@ fn parseSanitizedTransaction(
     allocator: std.mem.Allocator,
     transaction: pb.SanitizedTransaction,
 ) !struct { Hash, Transaction } {
-    const signatures = try allocator.alloc(Signature, transaction.signatures.items.len);
-    for (signatures, transaction.signatures.items) |*signature, pb_signature|
-        signature.* = .{ .data = pb_signature.getSlice()[0..Signature.SIZE].* };
+    const signatures = try allocator.alloc(
+        Signature,
+        @max(transaction.signatures.items.len, 1),
+    );
+    for (transaction.signatures.items, 0..) |pb_signature, i|
+        signatures[i] = .{ .data = pb_signature.getSlice()[0..Signature.SIZE].* };
+    if (transaction.signatures.items.len == 0) signatures[0] = Signature.ZEROES;
+
     const message_hash = Hash{ .data = transaction.message_hash.getSlice()[0..Hash.SIZE].* };
     const version, const message = try parseTransactionMesssage(
         allocator,
