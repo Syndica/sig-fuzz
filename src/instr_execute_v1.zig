@@ -2,6 +2,7 @@ const std = @import("std");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const sig = @import("sig");
 const utils = @import("utils.zig");
+const protobuf_parse = @import("protobuf_parse.zig");
 
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
@@ -9,6 +10,7 @@ const sysvar = sig.runtime.sysvar;
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
+const BatchAccounts = sig.runtime.account_loader.BatchAccountCache;
 
 const EMIT_LOGS = false;
 
@@ -68,13 +70,63 @@ export fn sol_compat_instr_execute_v1(
     return 1;
 }
 
+const AccountSharedData = sig.runtime.AccountSharedData;
+const bpf_loader = sig.runtime.program.bpf_loader;
+
+/// Load accounts for instruction harness.
+/// [agave] https://github.com/firedancer-io/solfuzz-agave/blob/11c04e7e6a1edc014c2f7899311b0ca8e49f9d0c/src/lib.rs#L765-L793
+fn loadAccounts(
+    allocator: std.mem.Allocator,
+    program_pubkey: Pubkey,
+    account_states: std.ArrayList(pb.AcctState),
+) std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData) {
+    const accounts = std.AutoArrayHashMapUnmanaged(
+        Pubkey,
+        AccountSharedData,
+    ){};
+    errdefer {
+        for (accounts.values()) |acc| allocator.free(acc.data);
+        accounts.deinit(allocator);
+    }
+
+    for (account_states.items) |account| {
+        const pubkey = try protobuf_parse.parsePubkey(account.address);
+
+        // [agave] https://github.com/firedancer-io/solfuzz-agave/blob/11c04e7e6a1edc014c2f7899311b0ca8e49f9d0c/src/lib.rs#L776-L791
+        const owner, const executable = if (pubkey.equals(&program_pubkey))
+            .{ bpf_loader.v3.ID, true }
+        else
+            .{ try protobuf_parse.parsePubkey(account.owner), account.executable };
+
+        try accounts.put(
+            allocator,
+            pubkey,
+            .{
+                .lamports = account.lamports,
+                .data = try allocator.dupe(u8, account.data.getSlice()),
+                .executable = executable,
+                .rent_epoch = account.rent_epoch,
+                .owner = owner,
+            },
+        );
+    }
+
+    return accounts;
+}
+
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
+    const program_pubkey = try protobuf_parse.parsePubkey(pb_instr_ctx.program_id);
+
+    const accounts = try loadAccounts(allocator, program_pubkey, pb_instr_ctx.accounts);
+
     var tc: TransactionContext = undefined;
+    var accounts: BatchAccounts = .{};
     try utils.createTransactionContext(
         allocator,
         pb_instr_ctx,
         .{},
         &tc,
+        &accounts,
     );
     defer utils.deinitTransactionContext(allocator, tc);
 

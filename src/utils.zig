@@ -18,6 +18,7 @@ const TransactionContextAccount = sig.runtime.transaction_context.TransactionCon
 const FeatureSet = sig.runtime.FeatureSet;
 const SysvarCache = sig.runtime.SysvarCache;
 const EpochStakes = sig.core.stake.EpochStakes;
+const BatchAccounts = sig.runtime.account_loader.BatchAccountCache;
 
 const Pubkey = sig.core.Pubkey;
 
@@ -34,6 +35,7 @@ pub fn createTransactionContext(
         sysvar_cache: ?*SysvarCache = null,
     },
     tc: *TransactionContext,
+    accounts: *BatchAccounts,
 ) !void {
     const feature_set = if (environment.feature_set) |ptr|
         ptr
@@ -62,6 +64,7 @@ pub fn createTransactionContext(
         .accounts = try createTransactionContextAccounts(
             allocator,
             instr_ctx.accounts.items,
+            accounts,
         ),
         .serialized_accounts = .{},
         .instruction_stack = .{},
@@ -134,15 +137,16 @@ pub fn createFeatureSet(
 pub fn createTransactionContextAccounts(
     allocator: std.mem.Allocator,
     pb_accounts: []const pb.AcctState,
+    accounts: BatchAccounts,
 ) ![]TransactionContextAccount {
     errdefer |err| {
         std.debug.print("createTransactionContextAccounts: error={}\n", .{err});
     }
 
-    var accounts = std.ArrayList(TransactionContextAccount).init(allocator);
+    var txn_accounts = std.ArrayList(TransactionContextAccount).init(allocator);
     errdefer {
-        for (accounts.items) |account| account.deinit(allocator);
-        accounts.deinit();
+        for (txn_accounts.items) |account| account.deinit(allocator);
+        txn_accounts.deinit();
     }
 
     for (pb_accounts) |pb_account| {
@@ -151,7 +155,7 @@ pub fn createTransactionContextAccounts(
 
         if (pb_account.owner.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         if (pb_account.address.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
-        try accounts.append(
+        try txn_accounts.append(
             TransactionContextAccount.init(
                 .{ .data = pb_account.address.getSlice()[0..Pubkey.SIZE].* },
                 .{
@@ -165,7 +169,7 @@ pub fn createTransactionContextAccounts(
         );
     }
 
-    return accounts.toOwnedSlice();
+    return txn_accounts.toOwnedSlice();
 }
 
 pub fn createInstructionInfo(
