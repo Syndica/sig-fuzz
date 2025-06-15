@@ -15,7 +15,7 @@ const syscalls = svm.syscalls;
 const Elf = svm.Elf;
 const Executable = svm.Executable;
 const Config = svm.Config;
-const BuiltinProgram = svm.BuiltinProgram;
+const Syscall = sig.vm.Syscall;
 const Vm = svm.Vm;
 const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
@@ -369,20 +369,20 @@ pub fn createSyscallRegistry(
     feature_set: *const sig.runtime.FeatureSet,
     slot: u64,
     is_deploy: bool,
-) !BuiltinProgram {
+) !Registry(Syscall) {
     // Register syscalls
-    var registry = BuiltinProgram{};
+    var registry = Registry(Syscall){};
     errdefer registry.deinit(allocator);
 
     // Abort
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "abort",
         stub,
     );
 
     // Panic
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_panic_",
         stub,
@@ -390,7 +390,7 @@ pub fn createSyscallRegistry(
 
     // Alloc Free
     if (!is_deploy) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_alloc_free",
             stub,
@@ -398,68 +398,68 @@ pub fn createSyscallRegistry(
     }
 
     // Logging
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_log_",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_log_64_",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_log_pubkey",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_log_compute_units_",
         stub,
     );
 
     // Log Data
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_log_data",
         stub,
     );
 
     // Program derived addresses
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_create_program_address",
         stub,
     );
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_try_find_program_address",
         stub,
     );
 
     // Sha256, Keccak256, Secp256k1Recover
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_sha256",
         stub,
     );
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_keccak256",
         stub,
     );
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_secp256k1_recover",
         stub,
     );
     // Blake3
     if (feature_set.isActive(features.BLAKE3_SYSCALL_ENABLED, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_blake3",
             stub,
@@ -468,17 +468,17 @@ pub fn createSyscallRegistry(
 
     // Elliptic Curve
     if (feature_set.isActive(features.CURVE25519_SYSCALL_ENABLED, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_curve_validate_point",
             stub,
         );
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_curve_group_op",
             stub,
         );
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_curve_multiscalar_mul",
             stub,
@@ -486,95 +486,95 @@ pub fn createSyscallRegistry(
     }
 
     // Sysvars
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_clock_sysvar",
         stub,
     );
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_epoch_schedule_sysvar",
         stub,
     );
     if (!feature_set.isActive(features.DISABLE_FEES_SYSVAR, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_get_fees_sysvar",
             stub,
         );
     }
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_rent_sysvar",
         stub,
     );
     if (feature_set.isActive(features.LAST_RESTART_SLOT_SYSVAR, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_get_last_restart_slot",
             stub,
         );
     }
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_epoch_rewards_sysvar",
         stub,
     );
 
     // Memory
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_memcpy_",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_memmove_",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_memset_",
         stub,
     );
 
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_memcmp_",
         stub,
     );
 
     // Processed Sibling
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_processed_sibling_instruction",
         stub,
     );
 
     // Stack Height
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_get_stack_height",
         stub,
     );
 
     // Return Data
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_set_return_data",
         stub,
     );
-    // _ = try registry.functions.registerHashed(allocator, "sol_get_return_data", getReturnData,);
+    // _ = try registry.registerHashed(allocator, "sol_get_return_data", getReturnData,);
 
     // Cross Program Invocation
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_invoke_signed_c",
         stub,
     );
-    _ = try registry.functions.registerHashed(
+    _ = try registry.registerHashed(
         allocator,
         "sol_invoke_signed_rust",
         stub,
@@ -582,7 +582,7 @@ pub fn createSyscallRegistry(
 
     // Memory Allocator
     if (!feature_set.isActive(features.DISABLE_DEPLOY_OF_ALLOC_FREE_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_alloc_free_",
             stub,
@@ -591,7 +591,7 @@ pub fn createSyscallRegistry(
 
     // Alt_bn128
     if (feature_set.isActive(features.ENABLE_ALT_BN128_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_alt_bn128_group_op",
             stub,
@@ -600,7 +600,7 @@ pub fn createSyscallRegistry(
 
     // Big_mod_exp
     if (feature_set.isActive(features.ENABLE_BIG_MOD_EXP_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_big_mod_exp",
             stub,
@@ -609,7 +609,7 @@ pub fn createSyscallRegistry(
 
     // Poseidon
     if (feature_set.isActive(features.ENABLE_POSEIDON_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_poseidon",
             stub,
@@ -618,7 +618,7 @@ pub fn createSyscallRegistry(
 
     // Remaining Compute Units
     if (feature_set.isActive(features.REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_remaining_compute_units",
             stub,
@@ -627,7 +627,7 @@ pub fn createSyscallRegistry(
 
     // Alt_bn_128_compression
     if (feature_set.isActive(features.ENABLE_ALT_BN128_COMPRESSION_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_alt_bn128_compression",
             stub,
@@ -636,7 +636,7 @@ pub fn createSyscallRegistry(
 
     // Sysvar Getter
     if (feature_set.isActive(features.GET_SYSVAR_SYSCALL_ENABLED, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_get_sysvar",
             stub,
@@ -645,7 +645,7 @@ pub fn createSyscallRegistry(
 
     // Get Epoch Stake
     if (feature_set.isActive(features.ENABLE_GET_EPOCH_STAKE_SYSCALL, slot)) {
-        _ = try registry.functions.registerHashed(
+        _ = try registry.registerHashed(
             allocator,
             "sol_get_epoch_stake",
             stub,

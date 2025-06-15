@@ -140,10 +140,7 @@ pub fn createTransactionContextAccounts(
     }
 
     var accounts = std.ArrayList(TransactionContextAccount).init(allocator);
-    errdefer {
-        for (accounts.items) |account| account.deinit(allocator);
-        accounts.deinit();
-    }
+    errdefer accounts.deinit();
 
     for (pb_accounts) |pb_account| {
         const account_data = try allocator.dupe(u8, pb_account.data.getSlice());

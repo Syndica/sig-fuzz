@@ -12,7 +12,7 @@ const Elf = svm.Elf;
 const Executable = svm.Executable;
 const Config = svm.Config;
 const memory = svm.memory;
-const BuiltinProgram = svm.BuiltinProgram;
+const Syscall = sig.vm.Syscall;
 const Vm = svm.Vm;
 const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
@@ -54,7 +54,7 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .calldests = std.ArrayList(u64).init(allocator),
     };
 
-    var loader: BuiltinProgram = .{};
+    var loader: Registry(Syscall) = .{};
     defer loader.deinit(allocator);
 
     inline for (.{
@@ -67,7 +67,7 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .{ "abort", syscalls.abort },
     }) |entry| {
         const name, const function = entry;
-        _ = try loader.functions.registerHashed(
+        _ = try loader.registerHashed(
             allocator,
             name,
             function,
