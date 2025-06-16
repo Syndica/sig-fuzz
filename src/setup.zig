@@ -25,6 +25,11 @@ const Rent = sig.runtime.sysvar.Rent;
 
 const ManagedString = protobuf.ManagedString;
 
+pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
+    const size = @min(dst.len, prefix.len);
+    @memcpy(dst[0..size], prefix[0..size]);
+}
+
 pub fn parsePubkey(address: ManagedString) !Pubkey {
     if (address.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     return .{ .data = address.getSlice()[0..Pubkey.SIZE].* };

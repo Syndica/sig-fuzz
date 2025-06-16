@@ -4,7 +4,7 @@ comptime {
     // _ = @import("elf.zig");
     // _ = @import("shred_parse.zig");
     _ = @import("instr_execute_v1.zig");
-    // _ = @import("vm_interp.zig");
+    _ = @import("vm_interp.zig");
     // _ = @import("vm_syscall_execute_v1.zig");
 }
 

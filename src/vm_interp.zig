@@ -2,7 +2,8 @@ const std = @import("std");
 const sig = @import("sig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const protobuf = @import("protobuf");
-const utils = @import("utils.zig");
+const setup = @import("setup.zig");
+const effects = @import("effects.zig");
 
 const serialize = sig.runtime.program.bpf.serialize;
 const executor = sig.runtime.executor;
@@ -20,6 +21,7 @@ const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
 const Version = svm.sbpf.Version;
 const memory = svm.memory;
+const TransactionContext = sig.runtime.TransactionContext;
 
 const HEAP_MAX = 256 * 1024;
 const STACK_SIZE = 4_096 * 64;
@@ -76,18 +78,26 @@ fn executeVmTest(
         });
     }
 
-    var feature_set = try allocator.create(sig.runtime.FeatureSet);
-    feature_set.* = try utils.createFeatureSet(allocator, instr_context);
-    var tc: sig.runtime.TransactionContext = undefined;
-    try utils.createTransactionContext(
+    const loaded_accounts = try setup.loadAccounts(
         allocator,
-        instr_context,
-        .{
-            .feature_set = feature_set,
-        },
-        &tc,
+        &instr_context,
     );
-    defer utils.deinitTransactionContext(allocator, tc);
+    defer {
+        for (loaded_accounts.values()) |acc| allocator.free(acc.data);
+        var accs = loaded_accounts;
+        accs.deinit(allocator);
+    }
+
+    var feature_set = try setup.loadFeatureSet(allocator, &instr_context);
+    var tc: TransactionContext = undefined;
+    try setup.createTransactionContext(
+        allocator,
+        &tc,
+        &loaded_accounts,
+        &instr_context,
+        &feature_set,
+    );
+    defer setup.deinitTransactionContext(allocator, tc);
 
     const sbpf_version: Version = switch (vm_context.sbpf_version) {
         1 => .v1,
@@ -100,15 +110,12 @@ fn executeVmTest(
     }
 
     const direct_mapping = sbpf_version.gte(.v1) or
-        feature_set.isActive(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
+        feature_set.active.contains(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING);
 
-    if (instr_context.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
-    const instr_info = try utils.createInstructionInfo(
+    const instr_info = try setup.createInstructionInfo(
         allocator,
         &tc,
-        .{ .data = instr_context.program_id.getSlice()[0..Pubkey.SIZE].* },
-        instr_context.data.getSlice(),
-        instr_context.instr_accounts.items,
+        &instr_context,
     );
     defer instr_info.deinit(allocator);
 
@@ -143,10 +150,9 @@ fn executeVmTest(
     const rodata = try allocator.dupe(u8, vm_context.rodata.getSlice());
     defer allocator.free(rodata);
 
-    const syscall_registry = try createSyscallRegistry(
+    var syscall_registry = try sig.vm.Environment.initV1Loader(
         allocator,
-        feature_set,
-        (try tc.sysvar_cache.get(sysvar.Clock)).slot,
+        &feature_set,
         false,
     );
     defer syscall_registry.deinit(allocator);
@@ -267,8 +273,8 @@ fn executeVmTest(
     // vm.registers.set(.r10, vm_context.r10);
     // vm.registers.set(.pc, vm_context.r11);
 
-    utils.copyPrefix(heap, syscall_inv.heap_prefix.getSlice());
-    utils.copyPrefix(stack, syscall_inv.stack_prefix.getSlice());
+    setup.copyPrefix(heap, syscall_inv.heap_prefix.getSlice());
+    setup.copyPrefix(stack, syscall_inv.stack_prefix.getSlice());
 
     const result, _ = vm.run();
 
@@ -297,7 +303,7 @@ fn executeVmTest(
 
     // finds the last element that isn't a 0 so that we can compress the stack list
     const last_item = if (std.mem.lastIndexOfNone(u8, stack, &.{0})) |last| last + 1 else 0;
-    return utils.createSyscallEffect(allocator, .{
+    return effects.createSyscallEffects(allocator, .{
         .tc = &tc,
         .err = err,
         .err_kind = .UNSPECIFIED,
@@ -354,302 +360,4 @@ fn convertError(err: anyerror) i32 {
             std.debug.panic("unknown err: {s}", .{@errorName(err)});
         },
     };
-}
-
-fn stub(
-    _: *sig.runtime.TransactionContext,
-    _: *sig.vm.memory.MemoryMap,
-    _: *sig.vm.interpreter.RegisterMap,
-) sig.vm.syscalls.Error!void {}
-
-// [agave] https://github.com/anza-xyz/agave/blob/a2af4430d278fcf694af7a2ea5ff64e8a1f5b05b/programs/bpf_loader/src/syscalls/mod.rs#L335
-pub fn createSyscallRegistry(
-    allocator: std.mem.Allocator,
-    feature_set: *const sig.runtime.FeatureSet,
-    slot: u64,
-    is_deploy: bool,
-) !Registry(Syscall) {
-    // Register syscalls
-    var registry = Registry(Syscall){};
-    errdefer registry.deinit(allocator);
-
-    // Abort
-    _ = try registry.registerHashed(
-        allocator,
-        "abort",
-        stub,
-    );
-
-    // Panic
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_panic_",
-        stub,
-    );
-
-    // Alloc Free
-    if (!is_deploy) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_alloc_free",
-            stub,
-        );
-    }
-
-    // Logging
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_log_",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_log_64_",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_log_pubkey",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_log_compute_units_",
-        stub,
-    );
-
-    // Log Data
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_log_data",
-        stub,
-    );
-
-    // Program derived addresses
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_create_program_address",
-        stub,
-    );
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_try_find_program_address",
-        stub,
-    );
-
-    // Sha256, Keccak256, Secp256k1Recover
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_sha256",
-        stub,
-    );
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_keccak256",
-        stub,
-    );
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_secp256k1_recover",
-        stub,
-    );
-    // Blake3
-    if (feature_set.isActive(features.BLAKE3_SYSCALL_ENABLED, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_blake3",
-            stub,
-        );
-    }
-
-    // Elliptic Curve
-    if (feature_set.isActive(features.CURVE25519_SYSCALL_ENABLED, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_curve_validate_point",
-            stub,
-        );
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_curve_group_op",
-            stub,
-        );
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_curve_multiscalar_mul",
-            stub,
-        );
-    }
-
-    // Sysvars
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_clock_sysvar",
-        stub,
-    );
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_epoch_schedule_sysvar",
-        stub,
-    );
-    if (!feature_set.isActive(features.DISABLE_FEES_SYSVAR, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_get_fees_sysvar",
-            stub,
-        );
-    }
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_rent_sysvar",
-        stub,
-    );
-    if (feature_set.isActive(features.LAST_RESTART_SLOT_SYSVAR, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_get_last_restart_slot",
-            stub,
-        );
-    }
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_epoch_rewards_sysvar",
-        stub,
-    );
-
-    // Memory
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_memcpy_",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_memmove_",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_memset_",
-        stub,
-    );
-
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_memcmp_",
-        stub,
-    );
-
-    // Processed Sibling
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_processed_sibling_instruction",
-        stub,
-    );
-
-    // Stack Height
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_get_stack_height",
-        stub,
-    );
-
-    // Return Data
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_set_return_data",
-        stub,
-    );
-    // _ = try registry.registerHashed(allocator, "sol_get_return_data", getReturnData,);
-
-    // Cross Program Invocation
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_invoke_signed_c",
-        stub,
-    );
-    _ = try registry.registerHashed(
-        allocator,
-        "sol_invoke_signed_rust",
-        stub,
-    );
-
-    // Memory Allocator
-    if (!feature_set.isActive(features.DISABLE_DEPLOY_OF_ALLOC_FREE_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_alloc_free_",
-            stub,
-        );
-    }
-
-    // Alt_bn128
-    if (feature_set.isActive(features.ENABLE_ALT_BN128_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_alt_bn128_group_op",
-            stub,
-        );
-    }
-
-    // Big_mod_exp
-    if (feature_set.isActive(features.ENABLE_BIG_MOD_EXP_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_big_mod_exp",
-            stub,
-        );
-    }
-
-    // Poseidon
-    if (feature_set.isActive(features.ENABLE_POSEIDON_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_poseidon",
-            stub,
-        );
-    }
-
-    // Remaining Compute Units
-    if (feature_set.isActive(features.REMAINING_COMPUTE_UNITS_SYSCALL_ENABLED, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_remaining_compute_units",
-            stub,
-        );
-    }
-
-    // Alt_bn_128_compression
-    if (feature_set.isActive(features.ENABLE_ALT_BN128_COMPRESSION_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_alt_bn128_compression",
-            stub,
-        );
-    }
-
-    // Sysvar Getter
-    if (feature_set.isActive(features.GET_SYSVAR_SYSCALL_ENABLED, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_get_sysvar",
-            stub,
-        );
-    }
-
-    // Get Epoch Stake
-    if (feature_set.isActive(features.ENABLE_GET_EPOCH_STAKE_SYSCALL, slot)) {
-        _ = try registry.registerHashed(
-            allocator,
-            "sol_get_epoch_stake",
-            stub,
-        );
-    }
-
-    return registry;
 }
