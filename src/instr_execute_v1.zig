@@ -6,13 +6,18 @@ const std = @import("std");
 
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
-
-const InstructionError = sig.core.instruction.InstructionError;
-const TransactionContext = sig.runtime.transaction_context.TransactionContext;
-
-// Loader imports
+const features = sig.runtime.features;
 const bpf_loader = sig.runtime.program.bpf_loader;
 const program_loader = sig.runtime.program_loader;
+
+const InstructionError = sig.core.instruction.InstructionError;
+const Pubkey = sig.core.Pubkey;
+const AccountSharedData = sig.runtime.AccountSharedData;
+const SysvarCache = sig.runtime.SysvarCache;
+const FeatureSet = sig.runtime.FeatureSet;
+const TransactionContext = sig.runtime.TransactionContext;
+const InstructionInfo = sig.runtime.InstructionInfo;
+const Rent = sig.runtime.sysvar.Rent;
 const ComputeBudget = sig.runtime.ComputeBudget;
 const Hash = sig.core.Hash;
 const ProgramMap = sig.runtime.program_loader.ProgramMap;
@@ -38,21 +43,18 @@ export fn sol_compat_instr_execute_v1(
     defer decode_arena.deinit();
 
     const in_slice = in_ptr[0..in_size];
-    var pb_instr_ctx = pb.InstrContext.decode(
+    var instruction_context = try pb.InstrContext.decode(
         in_slice,
         decode_arena.allocator(),
-    ) catch |err| {
-        std.debug.print("pb.InstrContext.decode: {s}\n", .{@errorName(err)});
-        return 0;
-    };
-    defer pb_instr_ctx.deinit();
+    );
+    defer instruction_context.deinit();
 
     // utils.printPbInstrContext(pb_instr_ctx) catch |err| {
     //     std.debug.print("printPbInstrContext: {s}\n", .{@errorName(err)});
     //     return 0;
     // };
 
-    const result = executeInstruction(allocator, pb_instr_ctx, EMIT_LOGS) catch |err| {
+    const result = executeInstruction(allocator, &instruction_context, EMIT_LOGS) catch |err| {
         std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
         return 0;
     };
@@ -81,110 +83,28 @@ export fn sol_compat_instr_execute_v1(
 
 fn executeInstruction(
     allocator: std.mem.Allocator,
-    instruction_context: pb.InstrContext,
+    instruction_context: *const pb.InstrContext,
     emit_logs: bool,
 ) !pb.InstrEffects {
-    errdefer |err| {
-        if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
-        std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
-    }
-
-    const accounts = try setup.loadAccounts(allocator, instruction_context);
+    const loaded_accounts = try setup.loadAccounts(
+        allocator,
+        instruction_context,
+    );
     defer {
-        for (accounts.values()) |acc| allocator.free(acc.data);
-        var accs = accounts;
+        for (loaded_accounts.values()) |acc| allocator.free(acc.data);
+        var accs = loaded_accounts;
         accs.deinit(allocator);
     }
 
-    const feature_set = try setup.loadFeatureSet(allocator, instruction_context);
-    defer feature_set.deinit(allocator);
-
-    const epoch_stakes = try EpochStakes.initEmpty(allocator);
-    defer epoch_stakes.deinit(allocator);
-
-    const sysvar_cache = try setup.loadSysvarCache(allocator, instruction_context);
-    defer sysvar_cache.deinit(allocator);
-
-    const compute_budget = ComputeBudget.default(instruction_context.cu_avail);
-
-    const vm_environment = try VmEnvironment.initV1(
+    var transaction_context: TransactionContext = undefined;
+    try setup.createTransactionContext(
         allocator,
-        &feature_set,
-        &compute_budget,
-        false,
-        false,
+        &transaction_context,
+        &loaded_accounts,
+        instruction_context,
+        null,
     );
-    defer vm_environment.deinit(allocator);
-
-    const clock = try sysvar_cache.get(sysvar.Clock);
-    const epoch_schedule = try sysvar_cache.get(sysvar.EpochSchedule);
-    const rent = try sysvar_cache.get(sysvar.Rent);
-
-    const maybe_recent_blockhashes = sysvar_cache.get(sysvar.RecentBlockhashes) catch null;
-    const maybe_last_entry = if (maybe_recent_blockhashes) |rb| rb.last() else null;
-    const blockhash, const lamports_per_signature = if (maybe_last_entry) |entry|
-        .{ entry.blockhash, entry.fee_calculator.lamports_per_signature }
-    else
-        .{ Hash.ZEROES, 0 };
-
-    if (rent.lamports_per_byte_year > std.math.maxInt(u32) or
-        rent.exemption_threshold > 999.0 or
-        rent.exemption_threshold < 0.0 or
-        rent.burn_percent > 100)
-    {
-        return error.InvalidRent;
-    }
-
-    var program_map = ProgramMap{};
-    defer {
-        for (program_map.values()) |v| v.deinit(allocator);
-        program_map.deinit(allocator);
-    }
-
-    for (accounts.keys(), accounts.values()) |pubkey, account| {
-        if (!pubkey.equals(&bpf_loader.v1.ID) and
-            !pubkey.equals(&bpf_loader.v2.ID) and
-            !pubkey.equals(&bpf_loader.v3.ID) and
-            !pubkey.equals(&bpf_loader.v4.ID)) continue;
-
-        try program_map.put(allocator, pubkey, try program_loader.loadProgram(
-            allocator,
-            &account,
-            &accounts,
-            &vm_environment,
-            clock.slot,
-        ));
-    }
-
-    const transaction_context_accounts = try allocator.alloc(
-        TransactionContextAccount,
-        instruction_context.accounts.items.len,
-    );
-    for (instruction_context.accounts.items, 0..) |account, i| {
-        const pubkey = try setup.parsePubkey(account.address);
-        transaction_context_accounts[i] = TransactionContextAccount{
-            .pubkey = pubkey,
-            .account = accounts.getPtr(pubkey).?,
-        };
-    }
-
-    var transaction_context = TransactionContext{
-        .allocator = allocator,
-        .feature_set = &feature_set,
-        .epoch_stakes = &epoch_stakes,
-        .sysvar_cache = &sysvar_cache,
-        .vm_environment = &vm_environment,
-        .next_vm_environment = null,
-        .program_map = &program_map,
-        .accounts = transaction_context_accounts,
-        .compute_meter = compute_budget.compute_unit_limit,
-        .compute_budget = compute_budget,
-        .log_collector = LogCollector.default(),
-        .prev_blockhash = blockhash,
-        .prev_lamports_per_signature = lamports_per_signature,
-        .rent = rent,
-    };
-    defer transaction_context.deinit();
+    defer setup.deinitTransactionContext(allocator, transaction_context);
 
     const instruction_info = try setup.createInstructionInfo(
         allocator,
@@ -211,8 +131,6 @@ fn executeInstruction(
             std.debug.print("    {}: {s}\n", .{ index, msg });
         }
     }
-
-    _ = epoch_schedule;
 
     return effects.createInstrEffects(
         allocator,
