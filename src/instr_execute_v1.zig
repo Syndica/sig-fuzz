@@ -1,7 +1,6 @@
 const std = @import("std");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const sig = @import("sig");
-// const utils = @import("utils.zig");
 const protobuf_parse = @import("protobuf_parse.zig");
 
 const executor = sig.runtime.executor;
@@ -11,7 +10,19 @@ const features = sig.runtime.features;
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
-const BatchAccounts = sig.runtime.account_loader.BatchAccountCache;
+
+// Loader imports
+const AccountSharedData = sig.runtime.AccountSharedData;
+const bpf_loader = sig.runtime.program.bpf_loader;
+const SysvarCache = sig.runtime.SysvarCache;
+const program_loader = sig.runtime.program_loader;
+const ComputeBudget = sig.runtime.ComputeBudget;
+const Hash = sig.core.Hash;
+const LoadedProgram = sig.runtime.program_loader.LoadedProgram;
+const ProgramMap = sig.runtime.program_loader.ProgramMap;
+const VmEnvironment = sig.vm.Environment;
+const Syscall = sig.vm.Syscall;
+const Registry = sig.vm.Registry;
 
 const EMIT_LOGS = false;
 
@@ -70,9 +81,6 @@ export fn sol_compat_instr_execute_v1(
 
     return 1;
 }
-
-const AccountSharedData = sig.runtime.AccountSharedData;
-const bpf_loader = sig.runtime.program.bpf_loader;
 
 /// Load accounts for instruction harness.
 /// [agave] https://github.com/firedancer-io/solfuzz-agave/blob/11c04e7e6a1edc014c2f7899311b0ca8e49f9d0c/src/lib.rs#L765-L793
@@ -162,29 +170,184 @@ fn loadFeatureSet(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext) !
     return feature_set;
 }
 
-const SysvarCache = sig.runtime.SysvarCache;
-
+/// Populate the sysvar cache using the instruction context accounts and
+/// set any necessary defaults if the associated account is not present.
+/// Defaults are requried for Clock, EpochSchedule, Rent, LastRestartSlot,
+/// [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/11c04e7e6a1edc014c2f7899311b0ca8e49f9d0c/src/lib.rs#L680-L738
 fn loadSysvarCache(
     allocator: std.mem.Allocator,
-    pb_instr_ctx: pb.InstrContext,
+    instr_ctx: pb.InstrContext,
 ) !SysvarCache {
-    _ = allocator;
-    _ = pb_instr_ctx;
-    @panic("loadSysvarCache not implemented");
+    var sysvar_cache = sig.runtime.SysvarCache{};
+
+    sysvar_cache.clock = try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.Clock.ID,
+    );
+    if (std.meta.isError(sysvar_cache.get(sysvar.Clock))) {
+        var clock = sysvar.Clock.DEFAULT;
+        clock.slot = 10;
+        sysvar_cache.clock = try sysvar.serialize(
+            allocator,
+            clock,
+        );
+    }
+
+    sysvar_cache.epoch_schedule = try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.EpochSchedule.ID,
+    );
+    if (std.meta.isError(sysvar_cache.get(sysvar.EpochSchedule))) {
+        sysvar_cache.epoch_schedule = try sysvar.serialize(
+            allocator,
+            sig.core.EpochSchedule.DEFAULT,
+        );
+    }
+
+    // Solfuzz Agave does not set a default for EpochRewards, therefore we
+    // only check that the loaded sysvar bytes are valid and otherwise return an error.
+    sysvar_cache.epoch_rewards = try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.EpochRewards.ID,
+    );
+    if (std.meta.isError(sysvar_cache.get(sysvar.EpochRewards))) {
+        return error.InvalidEpochRewardsData;
+    }
+
+    sysvar_cache.rent = try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.Rent.ID,
+    );
+    if (std.meta.isError(sysvar_cache.get(sysvar.Rent))) {
+        sysvar_cache.rent = try sysvar.serialize(
+            allocator,
+            sysvar.Rent.DEFAULT,
+        );
+    }
+
+    sysvar_cache.last_restart_slot = try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.LastRestartSlot.ID,
+    );
+    if (std.meta.isError(sysvar_cache.get(sysvar.LastRestartSlot))) {
+        sysvar_cache.last_restart_slot = try sysvar.serialize(
+            allocator,
+            sysvar.LastRestartSlot{
+                .last_restart_slot = 5000,
+            },
+        );
+    }
+
+    if (try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.SlotHashes.ID,
+    )) |slot_hashes| {
+        if (sig.bincode.readFromSlice(
+            allocator,
+            sysvar.SlotHashes,
+            slot_hashes,
+            .{},
+        ) catch null) |slot_hashes_obj| {
+            sysvar_cache.slot_hashes = slot_hashes;
+            sysvar_cache.slot_hashes_obj = slot_hashes_obj;
+        } else {
+            allocator.free(slot_hashes);
+        }
+    }
+
+    if (try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.StakeHistory.ID,
+    )) |stake_history_data| {
+        if (sig.bincode.readFromSlice(
+            allocator,
+            sysvar.StakeHistory,
+            stake_history_data,
+            .{},
+        ) catch null) |stake_history_obj| {
+            sysvar_cache.stake_history = stake_history_data;
+            sysvar_cache.stake_history_obj = stake_history_obj;
+        } else {
+            allocator.free(stake_history_data);
+        }
+    }
+
+    if (try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.Fees.ID,
+    )) |fees| {
+        if (sig.bincode.readFromSlice(
+            allocator,
+            sysvar.Fees,
+            fees,
+            .{},
+        ) catch null) |fees_obj| {
+            sysvar_cache.fees_obj = fees_obj;
+        } else {
+            allocator.free(fees);
+        }
+    }
+
+    if (try loadSysvar(
+        allocator,
+        instr_ctx,
+        sysvar.RecentBlockhashes.ID,
+    )) |recent_blockhashes| {
+        if (sig.bincode.readFromSlice(
+            allocator,
+            sysvar.RecentBlockhashes,
+            recent_blockhashes,
+            .{},
+        ) catch null) |recent_blockhashes_obj| {
+            sysvar_cache.recent_blockhashes_obj = recent_blockhashes_obj;
+        } else {
+            allocator.free(recent_blockhashes);
+        }
+    }
+
+    return sysvar_cache;
 }
 
-const program_loader = sig.runtime.program_loader;
-const ComputeBudget = sig.runtime.ComputeBudget;
-const Hash = sig.core.Hash;
-const LoadedProgram = sig.runtime.program_loader.LoadedProgram;
+/// Loads bytes for a given sysvar if an associated account is present in the
+/// instruction context accounts. Caller owns the returned data.
+fn loadSysvar(
+    allocator: std.mem.Allocator,
+    pb_instr_ctx: pb.InstrContext,
+    sysvar_pubkey: Pubkey,
+) !?[]const u8 {
+    for (pb_instr_ctx.accounts.items) |account| {
+        if (account.lamports == 0) continue;
+        const account_pubkey = try protobuf_parse.parsePubkey(account.address);
+        if (account_pubkey.equals(&sysvar_pubkey)) {
+            return try allocator.dupe(u8, account.data.getSlice());
+        }
+    }
+    return null;
+}
 
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
+    const loader = Registry(Syscall){};
+    _ = loader;
     const accounts = try loadAccounts(allocator, pb_instr_ctx);
     const feature_set = try loadFeatureSet(allocator, pb_instr_ctx);
     const sysvar_cache = try loadSysvarCache(allocator, pb_instr_ctx);
     const compute_budget = ComputeBudget.default(pb_instr_ctx.cu_avail);
-    const loader_v1 = try sig.vm.syscalls.register(allocator, &feature_set, false);
-    const config_v1 = sig.vm.Config.initV1(feature_set, compute_budget, false, false);
+    const vm_environment = try VmEnvironment.initV1(
+        allocator,
+        &feature_set,
+        &compute_budget,
+        false,
+        false,
+    );
+    defer vm_environment.deinit(allocator);
 
     const clock = try sysvar_cache.get(sysvar.Clock);
     const epoch_schedule = try sysvar_cache.get(sysvar.EpochSchedule);
@@ -204,7 +367,7 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
         return error.InvalidRent;
     }
 
-    var program_map = std.AutoArrayHashMapUnmanaged(Pubkey, LoadedProgram){};
+    var program_map = ProgramMap{};
     for (accounts.keys(), accounts.values()) |pubkey, account| {
         if (!pubkey.equals(&bpf_loader.v1.ID) and
             !pubkey.equals(&bpf_loader.v2.ID) and
@@ -215,8 +378,7 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
             allocator,
             &account,
             &accounts,
-            &loader_v1,
-            &config_v1,
+            &vm_environment,
             clock.slot,
         ));
     }

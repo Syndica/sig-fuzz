@@ -5,12 +5,9 @@ const sig = @import("sig");
 const ManagedString = @import("protobuf").ManagedString;
 
 const features = sig.runtime.features;
-const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 const memory = sig.vm.memory;
 
-const EbpfError = sig.vm.EbpfError;
-const SyscallError = sig.vm.SyscallError;
 const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
@@ -22,8 +19,6 @@ const EpochStakes = sig.core.stake.EpochStakes;
 const Pubkey = sig.core.Pubkey;
 
 const intFromInstructionError = sig.core.instruction.intFromInstructionError;
-
-const EMIT_LOGS = false;
 
 pub fn createTransactionContext(
     allocator: std.mem.Allocator,
@@ -294,9 +289,9 @@ pub fn createSysvarCache(
             }
         }
     }
-    if (sysvar_cache.fees == null) {
+    if (sysvar_cache.fees_obj == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.Fees.ID)) |fees_data| {
-            sysvar_cache.fees = sig.bincode.readFromSlice(
+            sysvar_cache.fees_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.Fees,
                 fees_data,
@@ -304,9 +299,9 @@ pub fn createSysvarCache(
             ) catch null;
         }
     }
-    if (sysvar_cache.recent_blockhashes == null) {
+    if (sysvar_cache.recent_blockhashes_obj == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
-            sysvar_cache.recent_blockhashes = sig.bincode.readFromSlice(
+            sysvar_cache.recent_blockhashes_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.RecentBlockhashes,
                 recent_blockhashes_data,

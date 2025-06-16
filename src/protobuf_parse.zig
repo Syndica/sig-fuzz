@@ -1,5 +1,4 @@
 const sig = @import("sig");
-const std = @import("std");
 const protobuf = @import("protobuf");
 
 const Pubkey = sig.core.Pubkey;

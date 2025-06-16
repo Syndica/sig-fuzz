@@ -12,7 +12,6 @@ const SyscallContext = pb.SyscallContext;
 const Pubkey = sig.core.Pubkey;
 const svm = sig.vm;
 const syscalls = svm.syscalls;
-const Elf = svm.Elf;
 const Executable = svm.Executable;
 const Config = svm.Config;
 const Syscall = sig.vm.Syscall;

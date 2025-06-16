@@ -3,8 +3,6 @@ const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const sig = @import("sig");
 const utils = @import("utils.zig");
 
-const ManagedString = @import("protobuf").ManagedString;
-
 const features = sig.runtime.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
@@ -12,18 +10,9 @@ const serialize = sig.runtime.program.bpf.serialize;
 const syscalls = sig.vm.syscalls;
 const memory = sig.vm.memory;
 
-const EbpfError = sig.vm.EbpfError;
-const SyscallError = sig.vm.SyscallError;
-const ExecutionError = sig.vm.ExecutionError;
-
-const SbpfVersion = sig.vm.sbpf.Version;
 const Vm = sig.vm.Vm;
 const VmConfig = sig.vm.Config;
-const InstructionError = sig.core.instruction.InstructionError;
-const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
-const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
-const FeatureSet = sig.runtime.FeatureSet;
 
 const Pubkey = sig.core.Pubkey;
 
