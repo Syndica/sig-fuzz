@@ -225,10 +225,15 @@ fn executeVmTest(
 
     try input_memory_regions.appendSlice(allocator, &.{
         memory.Region.init(.constant, vm_context.rodata.getSlice(), memory.RODATA_START),
-        memory.Region.initGapped(.mutable, stack, memory.STACK_START, if (config.enable_stack_frame_gaps)
-            config.stack_frame_size
-        else
-            0),
+        memory.Region.initGapped(
+            .mutable,
+            stack,
+            memory.STACK_START,
+            if (config.enable_stack_frame_gaps)
+                config.stack_frame_size
+            else
+                0,
+        ),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
     try input_memory_regions.appendSlice(allocator, regions.items);

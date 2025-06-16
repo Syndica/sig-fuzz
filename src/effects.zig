@@ -122,7 +122,10 @@ pub fn createSyscallEffects(allocator: std.mem.Allocator, params: struct {
     };
 }
 
-pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
+pub fn extractInputDataRegions(
+    allocator: std.mem.Allocator,
+    memory_map: memory.MemoryMap,
+) !std.ArrayList(pb.InputDataRegion) {
     var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
     errdefer regions.deinit();
 

@@ -85,7 +85,11 @@ export fn sol_compat_vm_syscall_execute_v1(
     return 1;
 }
 
-fn executeSyscall(allocator: std.mem.Allocator, syscall_context: pb.SyscallContext, emit_logs: bool) !pb.SyscallEffects {
+fn executeSyscall(
+    allocator: std.mem.Allocator,
+    syscall_context: pb.SyscallContext,
+    emit_logs: bool,
+) !pb.SyscallEffects {
     // Must have instruction context, vm context, and syscall invocation
     const instruction_context = syscall_context.instr_ctx orelse return error.NoInstrCtx;
     const vm_context = syscall_context.vm_ctx orelse return error.NoVmCtx;
@@ -207,7 +211,10 @@ fn executeSyscall(allocator: std.mem.Allocator, syscall_context: pb.SyscallConte
             .mutable,
             stack,
             memory.STACK_START,
-            if (tc.vm_environment.config.enable_stack_frame_gaps) tc.vm_environment.config.stack_frame_size else 0,
+            if (tc.vm_environment.config.enable_stack_frame_gaps)
+                tc.vm_environment.config.stack_frame_size
+            else
+                0,
         ),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });

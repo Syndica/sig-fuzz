@@ -300,7 +300,11 @@ pub fn createSysvarCache(
         }
     }
     if (sysvar_cache.recent_blockhashes_obj == null) {
-        if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
+        if (try cloneSysvarData(
+            allocator,
+            ctx,
+            sysvar.RecentBlockhashes.ID,
+        )) |recent_blockhashes_data| {
             sysvar_cache.recent_blockhashes_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.RecentBlockhashes,
@@ -312,7 +316,11 @@ pub fn createSysvarCache(
     return sysvar_cache;
 }
 
-fn cloneSysvarData(allocator: std.mem.Allocator, ctx: pb.InstrContext, pubkey: Pubkey) !?[]const u8 {
+fn cloneSysvarData(
+    allocator: std.mem.Allocator,
+    ctx: pb.InstrContext,
+    pubkey: Pubkey,
+) !?[]const u8 {
     for (ctx.accounts.items) |acc| {
         if (acc.lamports > 0 and std.mem.eql(u8, acc.address.getSlice(), &pubkey.data)) {
             return try allocator.dupe(u8, acc.data.getSlice());
@@ -345,7 +353,10 @@ fn intFromResult(result: ?InstructionError) i32 {
         0;
 }
 
-fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext) !std.ArrayList(pb.AcctState) {
+fn modifiedAccounts(
+    allocator: std.mem.Allocator,
+    tc: *const TransactionContext,
+) !std.ArrayList(pb.AcctState) {
     var accounts = std.ArrayList(pb.AcctState).init(allocator);
     errdefer accounts.deinit();
 
@@ -429,7 +440,10 @@ pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
     @memcpy(dst[0..size], prefix[0..size]);
 }
 
-pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
+pub fn extractInputDataRegions(
+    allocator: std.mem.Allocator,
+    memory_map: memory.MemoryMap,
+) !std.ArrayList(pb.InputDataRegion) {
     var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
     errdefer regions.deinit();
 
@@ -533,8 +547,12 @@ pub fn printPbVmContext(ctx: pb.VmContext) !void {
     try writer.writeAll("VmContext {");
     try std.fmt.format(writer, "\n\theap_max: {}", .{ctx.heap_max});
     try std.fmt.format(writer, ",\n\trodata: {any}", .{ctx.rodata.getSlice()});
-    try std.fmt.format(writer, ",\n\trodata_text_section_offset: {}", .{ctx.rodata_text_section_offset});
-    try std.fmt.format(writer, ",\n\trodata_text_section_length: {}", .{ctx.rodata_text_section_length});
+    try std.fmt.format(writer, ",\n\trodata_text_section_offset: {}", .{
+        ctx.rodata_text_section_offset,
+    });
+    try std.fmt.format(writer, ",\n\trodata_text_section_length: {}", .{
+        ctx.rodata_text_section_length,
+    });
     try writer.writeAll(",\n\tinput_data_regions: [");
     for (ctx.input_data_regions.items) |region| {
         try writer.writeAll("\n\t\tInputDataRegion {");
