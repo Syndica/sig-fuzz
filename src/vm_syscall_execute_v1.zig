@@ -1,7 +1,8 @@
 const std = @import("std");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const sig = @import("sig");
-const utils = @import("utils.zig");
+const setup = @import("setup.zig");
+const effects = @import("effects.zig");
 
 const features = sig.runtime.features;
 const executor = sig.runtime.executor;
@@ -86,11 +87,11 @@ export fn sol_compat_vm_syscall_execute_v1(
     return 1;
 }
 
-fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContext, emit_logs: bool) !pb.SyscallEffects {
+fn executeSyscall(allocator: std.mem.Allocator, syscall_context: pb.SyscallContext, emit_logs: bool) !pb.SyscallEffects {
     // Must have instruction context, vm context, and syscall invocation
-    const pb_instr = pb_syscall_ctx.instr_ctx orelse return error.NoInstrCtx;
-    const pb_vm = pb_syscall_ctx.vm_ctx orelse return error.NoVmCtx;
-    const pb_syscall_invocation = pb_syscall_ctx.syscall_invocation orelse
+    const instruction_context = syscall_context.instr_ctx orelse return error.NoInstrCtx;
+    const vm_context = syscall_context.vm_ctx orelse return error.NoVmCtx;
+    const syscall_invocation = syscall_context.syscall_invocation orelse
         return error.NoSyscallInvocation;
 
     // // [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_syscalls.rs#L75-L87
@@ -107,49 +108,28 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     //     });
     // }
 
-    // Create execution contexts
-    var tc: TransactionContext = undefined;
-    try utils.createTransactionContext(
+    const loaded_accounts = try setup.loadAccounts(
         allocator,
-        pb_instr,
-        .{},
-        &tc,
+        &instruction_context,
     );
-    defer utils.deinitTransactionContext(allocator, tc);
-    const syscall_registry = try sig.vm.syscalls.register(
-        allocator,
-        tc.feature_set,
-        (try tc.sysvar_cache.get(sysvar.Clock)).slot,
-        false,
-    );
-    defer syscall_registry.deinit(allocator);
+    defer {
+        for (loaded_accounts.values()) |acc| allocator.free(acc.data);
+        var accs = loaded_accounts;
+        accs.deinit(allocator);
+    }
 
-    const reject_broken_elfs = true;
-    const debugging_features = false;
-    const direct_mapping = tc.feature_set.isActive(
-        features.BPF_ACCOUNT_DATA_DIRECT_MAPPING,
-        0,
+    var tc: TransactionContext = undefined;
+    try setup.createTransactionContext(
+        allocator,
+        &tc,
+        &loaded_accounts,
+        &instruction_context,
+        null,
     );
-    const config = VmConfig{
-        .max_call_depth = tc.compute_budget.max_call_depth,
-        .stack_frame_size = tc.compute_budget.stack_frame_size,
-        .enable_address_translation = true,
-        .instruction_meter_checkpoint_distance = 10_000,
-        .enable_instruction_meter = true,
-        .enable_instruction_tracing = debugging_features,
-        .enable_symbol_and_section_labels = debugging_features,
-        .reject_broken_elfs = reject_broken_elfs,
-        .noop_instruction_rate = 256,
-        .sanitize_user_provided_values = true,
-        .optimize_rodata = false,
-        .aligned_memory_mapping = !direct_mapping,
-        .enable_stack_frame_gaps = !direct_mapping,
-        .maximum_version = .v0,
-        .minimum_version = .v0,
-    };
+    defer setup.deinitTransactionContext(allocator, tc);
 
     // Set return data
-    if (pb_vm.return_data) |return_data| {
+    if (vm_context.return_data) |return_data| {
         if (return_data.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         const program_id = Pubkey{ .data = return_data.program_id.getSlice()[0..Pubkey.SIZE].* };
         tc.return_data = .{ .program_id = program_id, .data = .{} };
@@ -160,13 +140,10 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // https://github.com/firedancer-io/solfuzz-agave/blob/0b8a7971055d822df3f602c287c368400a784c15/src/vm_syscalls.rs#L128-L130
 
     // Create instruction info and push it to the transaction context
-    if (pb_instr.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
-    const instr_info = try utils.createInstructionInfo(
+    const instr_info = try setup.createInstructionInfo(
         allocator,
         &tc,
-        .{ .data = pb_instr.program_id.getSlice()[0..Pubkey.SIZE].* },
-        pb_instr.data.getSlice(),
-        pb_instr.instr_accounts.items,
+        &instruction_context,
     );
     defer instr_info.deinit(allocator);
 
@@ -175,9 +152,9 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
 
     const host_align = 16;
 
-    const rodata = try allocator.alignedAlloc(u8, host_align, pb_vm.rodata.getSlice().len);
+    const rodata = try allocator.alignedAlloc(u8, host_align, vm_context.rodata.getSlice().len);
     defer allocator.free(rodata);
-    @memcpy(rodata, pb_vm.rodata.getSlice());
+    @memcpy(rodata, vm_context.rodata.getSlice());
 
     const executable: sig.vm.Executable = .{
         .instructions = &.{},
@@ -189,7 +166,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
             .end = rodata.len,
         } },
         .entry_pc = 0,
-        .config = config,
+        .config = tc.vm_environment.config,
         .text_vaddr = memory.RODATA_START,
         .function_registry = .{},
         .from_asm = false,
@@ -202,7 +179,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         try serialize.serializeParameters(
             allocator,
             ic,
-            !direct_mapping,
+            !tc.feature_set.active.contains(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING),
             mask_out_rent_epoch_in_vm_serialization,
         );
     defer {
@@ -211,9 +188,9 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     }
     tc.serialized_accounts = accounts_metadata;
 
-    if (pb_vm.heap_max > HEAP_MAX) return error.InvalidHeapSize;
+    if (vm_context.heap_max > HEAP_MAX) return error.InvalidHeapSize;
 
-    const heap_max = @min(HEAP_MAX, pb_vm.heap_max);
+    const heap_max = @min(HEAP_MAX, vm_context.heap_max);
 
     const heap = try allocator.alignedAlloc(u8, host_align, heap_max);
     defer allocator.free(heap);
@@ -232,7 +209,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
             .mutable,
             stack,
             memory.STACK_START,
-            if (config.enable_stack_frame_gaps) config.stack_frame_size else 0,
+            if (tc.vm_environment.config.enable_stack_frame_gaps) tc.vm_environment.config.stack_frame_size else 0,
         ),
         memory.Region.init(.mutable, heap, memory.HEAP_START),
     });
@@ -240,7 +217,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     const fixture_input_region_start = mm_regions.items.len;
 
     var input_data_offset: u64 = 0;
-    for (pb_vm.input_data_regions.items) |input_region| {
+    for (vm_context.input_data_regions.items) |input_region| {
         if (input_region.content.isEmpty()) continue;
 
         const copy = input_region.content.getSlice();
@@ -272,14 +249,14 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         allocator,
         mm_regions.items,
         .v0,
-        config,
+        tc.vm_environment.config,
     );
 
     var vm = try Vm.init(
         allocator,
         &executable,
         memory_map,
-        &syscall_registry,
+        &tc.vm_environment.loader,
         stack.len,
         &tc,
     );
@@ -289,17 +266,17 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     // r1-5 are the argument registers
     // r6-11 aren't used by the syscalls
     vm.registers.set(.r0, 0);
-    vm.registers.set(.r1, pb_vm.r1);
-    vm.registers.set(.r2, pb_vm.r2);
-    vm.registers.set(.r3, pb_vm.r3);
-    vm.registers.set(.r4, pb_vm.r4);
-    vm.registers.set(.r5, pb_vm.r5);
+    vm.registers.set(.r1, vm_context.r1);
+    vm.registers.set(.r2, vm_context.r2);
+    vm.registers.set(.r3, vm_context.r3);
+    vm.registers.set(.r4, vm_context.r4);
+    vm.registers.set(.r5, vm_context.r5);
 
-    utils.copyPrefix(heap, pb_syscall_invocation.heap_prefix.getSlice());
-    utils.copyPrefix(stack, pb_syscall_invocation.stack_prefix.getSlice());
+    setup.copyPrefix(heap, syscall_invocation.heap_prefix.getSlice());
+    setup.copyPrefix(stack, syscall_invocation.stack_prefix.getSlice());
 
-    const syscall_name = pb_syscall_ctx.syscall_invocation.?.function_name.getSlice();
-    const syscall_entry = syscall_registry.functions.lookupName(syscall_name) orelse {
+    const syscall_name = syscall_context.syscall_invocation.?.function_name.getSlice();
+    const syscall_entry = tc.vm_environment.loader.lookupName(syscall_name) orelse {
         std.debug.print("Syscall not found: {s}\n", .{syscall_name});
         return error.SyscallNotFound;
     };
@@ -327,7 +304,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         }
     }
 
-    const effects = try utils.createSyscallEffect(allocator, .{
+    const result = try effects.createSyscallEffects(allocator, .{
         .tc = &tc,
         .err = @"error",
         .err_kind = error_kind,
@@ -350,5 +327,5 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         }
     }
 
-    return effects;
+    return result;
 }
