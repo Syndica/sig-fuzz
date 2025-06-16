@@ -23,6 +23,11 @@ const ProgramMap = sig.runtime.program_loader.ProgramMap;
 const VmEnvironment = sig.vm.Environment;
 const Syscall = sig.vm.Syscall;
 const Registry = sig.vm.Registry;
+const EpochStakes = sig.core.stake.EpochStakes;
+const FeatureSet = sig.runtime.FeatureSet;
+const LogCollector = sig.runtime.LogCollector;
+const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
+const InstructionInfo = sig.runtime.InstructionInfo;
 
 const EMIT_LOGS = false;
 
@@ -142,8 +147,6 @@ fn loadAccounts(
     return accounts;
 }
 
-const FeatureSet = sig.runtime.FeatureSet;
-
 fn loadFeatureSet(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext) !FeatureSet {
     const maybe_pb_features = if (pb_instr_ctx.epoch_context) |epoch_ctx|
         if (epoch_ctx.features) |pb_features| pb_features else null
@@ -206,15 +209,13 @@ fn loadSysvarCache(
         );
     }
 
-    // Solfuzz Agave does not set a default for EpochRewards, therefore we
-    // only check that the loaded sysvar bytes are valid and otherwise return an error.
     sysvar_cache.epoch_rewards = try loadSysvar(
         allocator,
         instr_ctx,
         sysvar.EpochRewards.ID,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.EpochRewards))) {
-        return error.InvalidEpochRewardsData;
+        sysvar_cache.epoch_rewards = null;
     }
 
     sysvar_cache.rent = try loadSysvar(
@@ -333,13 +334,91 @@ fn loadSysvar(
     return null;
 }
 
+pub fn createInstructionInfo(
+    allocator: std.mem.Allocator,
+    tc: *const TransactionContext,
+    program_id: Pubkey,
+    instruction: []const u8,
+    pb_instruction_accounts: []const pb.InstrAcct,
+) !InstructionInfo {
+    errdefer |err| {
+        std.debug.print("createInstructionInfo: error={}\n", .{err});
+    }
+
+    const program_index_in_transaction = blk: {
+        for (tc.accounts, 0..) |acc, i| {
+            if (acc.pubkey.equals(&program_id)) {
+                break :blk i;
+            }
+        }
+        return error.CouldNotFindProgram;
+    };
+
+    var account_metas = std.BoundedArray(
+        InstructionInfo.AccountMeta,
+        InstructionInfo.MAX_ACCOUNT_METAS,
+    ){};
+
+    for (pb_instruction_accounts, 0..) |acc, idx| {
+        if (acc.index >= tc.accounts.len)
+            return error.AccountIndexOutOfBounds;
+
+        const index_in_callee = blk: {
+            for (0..idx) |i| {
+                if (acc.index ==
+                    pb_instruction_accounts[i].index)
+                {
+                    break :blk i;
+                }
+            }
+            break :blk idx;
+        };
+
+        try account_metas.append(.{
+            .pubkey = tc.accounts[acc.index].pubkey,
+            .index_in_transaction = @intCast(acc.index),
+            .index_in_caller = @intCast(acc.index),
+            .index_in_callee = @intCast(index_in_callee),
+            .is_signer = acc.is_signer,
+            .is_writable = acc.is_writable,
+        });
+    }
+
+    return .{
+        .program_meta = .{
+            .pubkey = program_id,
+            .index_in_transaction = @intCast(program_index_in_transaction),
+        },
+        .account_metas = account_metas,
+        .instruction_data = try allocator.dupe(u8, instruction),
+        .initial_account_lamports = 0,
+    };
+}
+
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
-    const loader = Registry(Syscall){};
-    _ = loader;
+    errdefer |err| {
+        if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
+        std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
+    }
+
     const accounts = try loadAccounts(allocator, pb_instr_ctx);
+    defer {
+        for (accounts.values()) |acc| allocator.free(acc.data);
+        var accs = accounts;
+        accs.deinit(allocator);
+    }
+
     const feature_set = try loadFeatureSet(allocator, pb_instr_ctx);
+    defer feature_set.deinit(allocator);
+
+    const epoch_stakes = try EpochStakes.initEmpty(allocator);
+    defer epoch_stakes.deinit(allocator);
+
     const sysvar_cache = try loadSysvarCache(allocator, pb_instr_ctx);
+    defer sysvar_cache.deinit(allocator);
+
     const compute_budget = ComputeBudget.default(pb_instr_ctx.cu_avail);
+
     const vm_environment = try VmEnvironment.initV1(
         allocator,
         &feature_set,
@@ -352,9 +431,10 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
     const clock = try sysvar_cache.get(sysvar.Clock);
     const epoch_schedule = try sysvar_cache.get(sysvar.EpochSchedule);
     const rent = try sysvar_cache.get(sysvar.Rent);
-    const recent_blockhashes = try sysvar_cache.get(sysvar.RecentBlockhashes);
 
-    const blockhash, const lamports_per_signature = if (recent_blockhashes.last()) |entry|
+    const maybe_recent_blockhashes = sysvar_cache.get(sysvar.RecentBlockhashes) catch null;
+    const maybe_last_entry = if (maybe_recent_blockhashes) |rb| rb.last() else null;
+    const blockhash, const lamports_per_signature = if (maybe_last_entry) |entry|
         .{ entry.blockhash, entry.fee_calculator.lamports_per_signature }
     else
         .{ Hash.ZEROES, 0 };
@@ -368,6 +448,11 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
     }
 
     var program_map = ProgramMap{};
+    defer {
+        for (program_map.values()) |v| v.deinit(allocator);
+        program_map.deinit(allocator);
+    }
+
     for (accounts.keys(), accounts.values()) |pubkey, account| {
         if (!pubkey.equals(&bpf_loader.v1.ID) and
             !pubkey.equals(&bpf_loader.v2.ID) and
@@ -383,55 +468,123 @@ fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContex
         ));
     }
 
-    _ = emit_logs;
+    const txn_accounts = try allocator.alloc(
+        TransactionContextAccount,
+        pb_instr_ctx.accounts.items.len,
+    );
+    for (pb_instr_ctx.accounts.items, 0..) |account, i| {
+        const pubkey = try protobuf_parse.parsePubkey(account.address);
+        txn_accounts[i] = TransactionContextAccount{
+            .pubkey = pubkey,
+            .account = accounts.getPtr(pubkey).?,
+        };
+    }
+
+    var tc = TransactionContext{
+        .allocator = allocator,
+        .feature_set = &feature_set,
+        .epoch_stakes = &epoch_stakes,
+        .sysvar_cache = &sysvar_cache,
+        .vm_environment = &vm_environment,
+        .next_vm_environment = null,
+        .program_map = &program_map,
+        .accounts = txn_accounts,
+        .compute_meter = compute_budget.compute_unit_limit,
+        .compute_budget = compute_budget,
+        .log_collector = LogCollector.default(),
+        .prev_blockhash = blockhash,
+        .prev_lamports_per_signature = lamports_per_signature,
+        .rent = rent,
+    };
+    defer tc.deinit();
+
+    const instr_info = try createInstructionInfo(
+        allocator,
+        &tc,
+        try protobuf_parse.parsePubkey(pb_instr_ctx.program_id),
+        pb_instr_ctx.data.getSlice(),
+        pb_instr_ctx.instr_accounts.items,
+    );
+    defer instr_info.deinit(allocator);
+
+    var result: ?InstructionError = null;
+    executor.executeInstruction(
+        allocator,
+        &tc,
+        instr_info,
+    ) catch |err| {
+        switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| result = e,
+        }
+    };
+
+    if (emit_logs) {
+        std.debug.print("Execution Logs:\n", .{});
+        for (tc.log_collector.?.collect(), 1..) |msg, index| {
+            std.debug.print("    {}: {s}\n", .{ index, msg });
+        }
+    }
+
     _ = epoch_schedule;
-    _ = blockhash;
-    _ = lamports_per_signature;
 
-    return error.Unimplemented;
+    return createInstrEffects(
+        allocator,
+        &tc,
+        result,
+    );
+}
 
-    // var tc: TransactionContext = undefined;
-    // try utils.createTransactionContext(
-    //     allocator,
-    //     pb_instr_ctx,
-    //     .{},
-    //     &tc,
-    //     &accounts,
-    // );
-    // defer utils.deinitTransactionContext(allocator, tc);
+const ManagedString = @import("protobuf").ManagedString;
+const intFromInstructionError = sig.core.instruction.intFromInstructionError;
 
-    // if (pb_instr_ctx.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
-    // const instr_info = try utils.createInstructionInfo(
-    //     allocator,
-    //     &tc,
-    //     .{ .data = pb_instr_ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
-    //     pb_instr_ctx.data.getSlice(),
-    //     pb_instr_ctx.instr_accounts.items,
-    // );
-    // defer instr_info.deinit(allocator);
+pub fn createInstrEffects(
+    allocator: std.mem.Allocator,
+    tc: *const TransactionContext,
+    result: ?InstructionError,
+) !pb.InstrEffects {
+    return pb.InstrEffects{
+        .result = intFromResult(result),
+        .custom_err = tc.custom_error orelse 0,
+        .modified_accounts = try modifiedAccounts(allocator, tc),
+        .cu_avail = tc.compute_meter,
+        .return_data = try ManagedString.copy(
+            tc.return_data.data.constSlice(),
+            allocator,
+        ),
+    };
+}
 
-    // var result: ?InstructionError = null;
-    // executor.executeInstruction(
-    //     allocator,
-    //     &tc,
-    //     instr_info,
-    // ) catch |err| {
-    //     switch (err) {
-    //         error.OutOfMemory => return err,
-    //         else => |e| result = e,
-    //     }
-    // };
+fn intFromResult(result: ?InstructionError) i32 {
+    return if (result) |err|
+        intFromInstructionError(err)
+    else
+        0;
+}
 
-    // if (emit_logs) {
-    //     std.debug.print("Execution Logs:\n", .{});
-    //     for (tc.log_collector.?.collect(), 1..) |msg, index| {
-    //         std.debug.print("    {}: {s}\n", .{ index, msg });
-    //     }
-    // }
+fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext) !std.ArrayList(pb.AcctState) {
+    var accounts = std.ArrayList(pb.AcctState).init(allocator);
+    errdefer accounts.deinit();
 
-    // return utils.createInstrEffects(
-    //     allocator,
-    //     &tc,
-    //     result,
-    // );
+    for (tc.accounts) |acc| {
+        try accounts.append(.{
+            .address = try ManagedString.copy(
+                &acc.pubkey.data,
+                allocator,
+            ),
+            .lamports = acc.account.lamports,
+            .data = try ManagedString.copy(
+                acc.account.data,
+                allocator,
+            ),
+            .executable = acc.account.executable,
+            .rent_epoch = acc.account.rent_epoch,
+            .owner = try ManagedString.copy(
+                &acc.account.owner.data,
+                allocator,
+            ),
+        });
+    }
+
+    return accounts;
 }
