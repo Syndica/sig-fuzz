@@ -5,26 +5,9 @@ const sig = @import("sig");
 const std = @import("std");
 
 const executor = sig.runtime.executor;
-const sysvar = sig.runtime.sysvar;
-const features = sig.runtime.features;
-const bpf_loader = sig.runtime.program.bpf_loader;
-const program_loader = sig.runtime.program_loader;
 
 const InstructionError = sig.core.instruction.InstructionError;
-const Pubkey = sig.core.Pubkey;
-const AccountSharedData = sig.runtime.AccountSharedData;
-const SysvarCache = sig.runtime.SysvarCache;
-const FeatureSet = sig.runtime.FeatureSet;
 const TransactionContext = sig.runtime.TransactionContext;
-const InstructionInfo = sig.runtime.InstructionInfo;
-const Rent = sig.runtime.sysvar.Rent;
-const ComputeBudget = sig.runtime.ComputeBudget;
-const Hash = sig.core.Hash;
-const ProgramMap = sig.runtime.program_loader.ProgramMap;
-const VmEnvironment = sig.vm.Environment;
-const EpochStakes = sig.core.stake.EpochStakes;
-const LogCollector = sig.runtime.LogCollector;
-const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
 
 const EMIT_LOGS = false;
 

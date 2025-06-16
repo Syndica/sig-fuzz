@@ -6,13 +6,11 @@ const effects = @import("effects.zig");
 
 const features = sig.runtime.features;
 const executor = sig.runtime.executor;
-const sysvar = sig.runtime.sysvar;
 const serialize = sig.runtime.program.bpf.serialize;
 const syscalls = sig.vm.syscalls;
 const memory = sig.vm.memory;
 
 const Vm = sig.vm.Vm;
-const VmConfig = sig.vm.Config;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 
 const Pubkey = sig.core.Pubkey;

@@ -21,7 +21,6 @@ const VmEnvironment = sig.vm.Environment;
 const ProgramMap = sig.runtime.program_loader.ProgramMap;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
 const LogCollector = sig.runtime.LogCollector;
-const Rent = sig.runtime.sysvar.Rent;
 
 const ManagedString = protobuf.ManagedString;
 

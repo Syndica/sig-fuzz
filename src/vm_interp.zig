@@ -7,15 +7,11 @@ const effects = @import("effects.zig");
 
 const serialize = sig.runtime.program.bpf.serialize;
 const executor = sig.runtime.executor;
-const sysvar = sig.runtime.sysvar;
 const features = sig.runtime.features;
 const SyscallContext = pb.SyscallContext;
-const Pubkey = sig.core.Pubkey;
 const svm = sig.vm;
-const syscalls = svm.syscalls;
 const Executable = svm.Executable;
 const Config = svm.Config;
-const Syscall = sig.vm.Syscall;
 const Vm = svm.Vm;
 const Registry = svm.Registry;
 const Instruction = svm.sbpf.Instruction;
