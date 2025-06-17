@@ -42,7 +42,7 @@ export fn sol_compat_instr_execute_v1(
         return 0;
     };
 
-    // printPbInstrEffects(result) catch |err| {
+    // @import("print.zig").printPbInstrEffects(result) catch |err| {
     //     std.debug.print("printPbInstrEffects: {s}\n", .{@errorName(err)});
     //     return 0;
     // };

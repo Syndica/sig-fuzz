@@ -369,10 +369,10 @@ pub fn createTransactionContext(
     program_map.* = ProgramMap{};
     const slot = (try sysvar_cache.get(sysvar.Clock)).slot;
     for (loaded_accounts.keys(), loaded_accounts.values()) |pubkey, account| {
-        if (!pubkey.equals(&bpf_loader.v1.ID) and
-            !pubkey.equals(&bpf_loader.v2.ID) and
-            !pubkey.equals(&bpf_loader.v3.ID) and
-            !pubkey.equals(&bpf_loader.v4.ID)) continue;
+        if (!account.owner.equals(&bpf_loader.v1.ID) and
+            !account.owner.equals(&bpf_loader.v2.ID) and
+            !account.owner.equals(&bpf_loader.v3.ID) and
+            !account.owner.equals(&bpf_loader.v4.ID)) continue;
 
         try program_map.put(allocator, pubkey, try program_loader.loadProgram(
             allocator,
