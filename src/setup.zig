@@ -90,9 +90,9 @@ pub fn loadAccounts(
 
 pub fn loadFeatureSet(
     allocator: std.mem.Allocator,
-    instruction_context: *const pb.InstrContext,
+    pb_epoch_ctx: ?pb.EpochContext,
 ) !FeatureSet {
-    const maybe_pb_features = if (instruction_context.epoch_context) |epoch_ctx|
+    const maybe_pb_features = if (pb_epoch_ctx) |epoch_ctx|
         if (epoch_ctx.features) |pb_features| pb_features else null
     else
         null;
@@ -119,14 +119,14 @@ pub fn loadFeatureSet(
 
 pub fn loadSysvarCache(
     allocator: std.mem.Allocator,
-    instruction_context: *const pb.InstrContext,
+    pb_instr_ctx: *const pb.InstrContext,
 ) !SysvarCache {
     var sysvar_cache = sig.runtime.SysvarCache{};
 
-    sysvar_cache.clock = try loadSysvar(
+    sysvar_cache.clock = try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.Clock.ID,
+        pb_instr_ctx.accounts,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.Clock))) {
         var clock = sysvar.Clock.DEFAULT;
@@ -137,10 +137,10 @@ pub fn loadSysvarCache(
         );
     }
 
-    sysvar_cache.epoch_schedule = try loadSysvar(
+    sysvar_cache.epoch_schedule = try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.EpochSchedule.ID,
+        pb_instr_ctx.accounts,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.EpochSchedule))) {
         sysvar_cache.epoch_schedule = try sysvar.serialize(
@@ -149,19 +149,19 @@ pub fn loadSysvarCache(
         );
     }
 
-    sysvar_cache.epoch_rewards = try loadSysvar(
+    sysvar_cache.epoch_rewards = try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.EpochRewards.ID,
+        pb_instr_ctx.accounts,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.EpochRewards))) {
         sysvar_cache.epoch_rewards = null;
     }
 
-    sysvar_cache.rent = try loadSysvar(
+    sysvar_cache.rent = try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.Rent.ID,
+        pb_instr_ctx.accounts,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.Rent))) {
         sysvar_cache.rent = try sysvar.serialize(
@@ -170,10 +170,10 @@ pub fn loadSysvarCache(
         );
     }
 
-    sysvar_cache.last_restart_slot = try loadSysvar(
+    sysvar_cache.last_restart_slot = try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.LastRestartSlot.ID,
+        pb_instr_ctx.accounts,
     );
     if (std.meta.isError(sysvar_cache.get(sysvar.LastRestartSlot))) {
         sysvar_cache.last_restart_slot = try sysvar.serialize(
@@ -184,10 +184,10 @@ pub fn loadSysvarCache(
         );
     }
 
-    if (try loadSysvar(
+    if (try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.SlotHashes.ID,
+        pb_instr_ctx.accounts,
     )) |slot_hashes| {
         if (sig.bincode.readFromSlice(
             allocator,
@@ -202,67 +202,56 @@ pub fn loadSysvarCache(
         }
     }
 
-    if (try loadSysvar(
+    if (try loadSysvarBytes(
         allocator,
-        instruction_context,
         sysvar.StakeHistory.ID,
-    )) |stake_history_data| {
+        pb_instr_ctx.accounts,
+    )) |stake_history| {
         if (sig.bincode.readFromSlice(
             allocator,
             sysvar.StakeHistory,
-            stake_history_data,
+            stake_history,
             .{},
         ) catch null) |stake_history_obj| {
-            sysvar_cache.stake_history = stake_history_data;
+            sysvar_cache.stake_history = stake_history;
             sysvar_cache.stake_history_obj = stake_history_obj;
         } else {
-            allocator.free(stake_history_data);
+            allocator.free(stake_history);
         }
     }
 
     if (try loadSysvar(
         allocator,
-        instruction_context,
-        sysvar.Fees.ID,
-    )) |fees| {
-        if (sig.bincode.readFromSlice(
-            allocator,
-            sysvar.Fees,
-            fees,
-            .{},
-        ) catch null) |fees_obj| {
-            sysvar_cache.fees_obj = fees_obj;
-        } else {
-            allocator.free(fees);
-        }
+        sysvar.Fees,
+        pb_instr_ctx.accounts,
+    )) |fees_obj| {
+        sysvar_cache.fees_obj = fees_obj;
     }
 
     if (try loadSysvar(
         allocator,
-        instruction_context,
-        sysvar.RecentBlockhashes.ID,
-    )) |recent_blockhashes| {
-        if (sig.bincode.readFromSlice(
-            allocator,
-            sysvar.RecentBlockhashes,
-            recent_blockhashes,
-            .{},
-        ) catch null) |recent_blockhashes_obj| {
-            sysvar_cache.recent_blockhashes_obj = recent_blockhashes_obj;
-        } else {
-            allocator.free(recent_blockhashes);
-        }
+        sysvar.RecentBlockhashes,
+        pb_instr_ctx.accounts,
+    )) |recent_blockhashes_obj| {
+        sysvar_cache.recent_blockhashes_obj = recent_blockhashes_obj;
     }
 
     return sysvar_cache;
 }
 
-pub fn loadSysvar(
+pub fn loadSysvar(allocator: std.mem.Allocator, comptime T: type, accounts: std.ArrayList(pb.AcctState)) !?T {
+    if (try loadSysvarBytes(allocator, T.ID, accounts)) |bytes| {
+        errdefer allocator.free(bytes);
+        return try sig.bincode.readFromSlice(allocator, T, bytes, .{});
+    } else return null;
+}
+
+pub fn loadSysvarBytes(
     allocator: std.mem.Allocator,
-    instruction_context: *const pb.InstrContext,
     sysvar_pubkey: Pubkey,
+    accounts: std.ArrayList(pb.AcctState),
 ) !?[]const u8 {
-    for (instruction_context.accounts.items) |account| {
+    for (accounts.items) |account| {
         if (account.lamports == 0) continue;
         const account_pubkey = try parsePubkey(account.address);
         if (account_pubkey.equals(&sysvar_pubkey)) {
@@ -337,7 +326,7 @@ pub fn createTransactionContext(
         ptr
     else
         try allocator.create(FeatureSet);
-    feature_set.* = try loadFeatureSet(allocator, instruction_context);
+    feature_set.* = try loadFeatureSet(allocator, instruction_context.epoch_context);
 
     const epoch_stakes: *EpochStakes = try allocator.create(EpochStakes);
     epoch_stakes.* = try EpochStakes.initEmpty(allocator);
