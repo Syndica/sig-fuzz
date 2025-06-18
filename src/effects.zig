@@ -148,10 +148,10 @@ pub fn extractInputDataRegions(
     }
 
     std.mem.sort(pb.InputDataRegion, regions.items, {}, struct {
-        pub fn cmp(_: void, a: pb.InputDataRegion, b: pb.InputDataRegion) bool {
+        pub fn lessThan(_: void, a: pb.InputDataRegion, b: pb.InputDataRegion) bool {
             return a.offset < b.offset;
         }
-    }.cmp);
+    }.lessThan);
 
     return regions;
 }

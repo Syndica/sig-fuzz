@@ -64,22 +64,18 @@ pub fn loadAccounts(
         const owner = try parsePubkey(account.owner);
         const executable = account.executable;
 
-        try accounts.put(
-            allocator,
-            pubkey,
-            .{
-                .lamports = account.lamports,
-                .data = try allocator.dupe(u8, account.data.getSlice()),
-                .executable = executable,
-                .rent_epoch = account.rent_epoch,
-                .owner = owner,
-            },
-        );
+        try accounts.put(allocator, pubkey, .{
+            .lamports = account.lamports,
+            .data = try allocator.dupe(u8, account.data.getSlice()),
+            .executable = executable,
+            .rent_epoch = account.rent_epoch,
+            .owner = owner,
+        });
     }
 
     // Add the program account if it does not exist.
     // [agave] https://github.com/firedancer-io/solfuzz-agave/blob/11c04e7e6a1edc014c2f7899311b0ca8e49f9d0c/src/lib.rs#L754-L763
-    if (accounts.get(program_pubkey) == null) {
+    if (accounts.contains(program_pubkey)) {
         try accounts.put(allocator, program_pubkey, .{
             .lamports = 0,
             .data = try allocator.dupe(u8, &.{}),
@@ -303,16 +299,9 @@ pub fn createInstructionInfo(
         if (acc.index >= transaction_context.accounts.len)
             return error.AccountIndexOutOfBounds;
 
-        const index_in_callee = blk: {
-            for (0..idx) |i| {
-                if (acc.index ==
-                    instr_accounts[i].index)
-                {
-                    break :blk i;
-                }
-            }
-            break :blk idx;
-        };
+        const index_in_callee = for (0..idx) |i| {
+            if (acc.index == instr_accounts[i].index) break i;
+        } else idx;
 
         try account_metas.append(.{
             .pubkey = transaction_context.accounts[acc.index].pubkey,

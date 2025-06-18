@@ -26,18 +26,22 @@ export fn sol_compat_instr_execute_v1(
     defer decode_arena.deinit();
 
     const in_slice = in_ptr[0..in_size];
-    var instruction_context = try pb.InstrContext.decode(
+    var pb_instruction_context = try pb.InstrContext.decode(
         in_slice,
         decode_arena.allocator(),
     );
-    defer instruction_context.deinit();
+    defer pb_instruction_context.deinit();
 
     // utils.printPbInstrContext(pb_instr_ctx) catch |err| {
     //     std.debug.print("printPbInstrContext: {s}\n", .{@errorName(err)});
     //     return 0;
     // };
 
-    const result = executeInstruction(allocator, &instruction_context, EMIT_LOGS) catch |err| {
+    const result = executeInstruction(
+        allocator,
+        &pb_instruction_context,
+        EMIT_LOGS,
+    ) catch |err| {
         std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
         return 0;
     };
@@ -69,14 +73,13 @@ fn executeInstruction(
     instruction_context: *const pb.InstrContext,
     emit_logs: bool,
 ) !pb.InstrEffects {
-    const loaded_accounts = try setup.loadAccounts(
+    var loaded_accounts = try setup.loadAccounts(
         allocator,
         instruction_context,
     );
     defer {
         for (loaded_accounts.values()) |acc| allocator.free(acc.data);
-        var accs = loaded_accounts;
-        accs.deinit(allocator);
+        loaded_accounts.deinit(allocator);
     }
 
     var transaction_context: TransactionContext = undefined;

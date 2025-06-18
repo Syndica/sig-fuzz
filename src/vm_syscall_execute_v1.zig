@@ -110,14 +110,13 @@ fn executeSyscall(
     //     });
     // }
 
-    const loaded_accounts = try setup.loadAccounts(
+    var loaded_accounts = try setup.loadAccounts(
         allocator,
         &instruction_context,
     );
     defer {
         for (loaded_accounts.values()) |acc| allocator.free(acc.data);
-        var accs = loaded_accounts;
-        accs.deinit(allocator);
+        loaded_accounts.deinit(allocator);
     }
 
     var tc: TransactionContext = undefined;
