@@ -84,7 +84,7 @@ fn executeVmTest(
         accs.deinit(allocator);
     }
 
-    var feature_set = try setup.loadFeatureSet(allocator, &instr_context);
+    var feature_set = try setup.loadFeatureSet(allocator, instr_context.epoch_context);
     var tc: TransactionContext = undefined;
     try setup.createTransactionContext(
         allocator,
