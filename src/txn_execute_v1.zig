@@ -1,13 +1,32 @@
-const std = @import("std");
+const effects = @import("effects.zig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
+const setup = @import("setup.zig");
 const sig = @import("sig");
-const utils = @import("utils.zig");
+const std = @import("std");
 
 const sysvar = sig.runtime.sysvar;
+
+const Hash = sig.core.Hash;
+const Signature = sig.core.Signature;
+const Transaction = sig.core.Transaction;
 
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
+const TransactionVersion = sig.core.transaction.Version;
+const TransactionMessage = sig.core.transaction.Message;
+const TransactionInstruction = sig.core.transaction.Instruction;
+const TransactionAddressLookup = sig.core.transaction.AddressLookup;
+const FeeRateGovernor = sig.core.FeeRateGovernor;
+const GenesisConfig = sig.core.GenesisConfig;
+const Inflation = sig.core.Inflation;
+const PohConfig = sig.core.PohConfig;
+const SysvarCache = sig.runtime.SysvarCache;
+const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
+const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
+const TransactionExecutionConfig = sig.runtime.transaction_execution.TransactionExecutionConfig;
+const BatchAccountCache = sig.runtime.account_loader.BatchAccountCache;
+const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecuteTransaction;
 
 const EMIT_LOGS = false;
 
@@ -67,17 +86,6 @@ export fn sol_compat_txn_execute_v1(
     return 1;
 }
 
-const FeeRateGovernor = sig.core.FeeRateGovernor;
-const GenesisConfig = sig.core.GenesisConfig;
-const Inflation = sig.core.Inflation;
-const PohConfig = sig.core.PohConfig;
-const SysvarCache = sig.runtime.SysvarCache;
-const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
-const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
-const TransactionExecutionConfig = sig.runtime.transaction_execution.TransactionExecutionConfig;
-const BatchAccountCache = sig.runtime.account_loader.BatchAccountCache;
-const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecuteTransaction;
-
 /// feature_set: FeatureSet <- Toggle Direct Mapping <- TxnContext.EpochContext.Features
 /// fee_collector: Pubkey <- Pubkey::new_unique()
 /// slot: u64 <- TxnContext.SlotContext.Slot | 10
@@ -102,33 +110,30 @@ const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecu
 /// metrics
 /// result: TransactionProcessingResult <- bank.load_and_execute_transactions(batch, ...)
 /// txn_result: TxnResult <- convert result to TxnResult
+const DEFAULT_SLOT: u64 = 10; // Arbitrary default > 10
+
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
     errdefer |err| {
         std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
         if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
     }
-    const bytes: []const u8 = @as([*]const u8, @ptrCast(&pb_txn_ctx))[0..@sizeOf(pb.TxnContext)];
-    var hasher = std.crypto.hash.Blake3.init(.{});
-    hasher.update(bytes);
-    var seed = Hash.ZEROES;
-    hasher.final(&seed.data);
-    var prng = std.Random.DefaultPrng.init(std.mem.bytesAsValue(u64, seed.data[0..8]).*);
+    var prng = std.Random.DefaultPrng.init(try generateSeed(pb_txn_ctx));
 
-    const feature_set = try utils.createFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
+    const feature_set = try setup.loadFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
     defer feature_set.deinit(allocator);
 
     // TODO: Toggle direct mapping
 
     const fee_collector = Pubkey.initRandom(prng.random());
-    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else 10;
+    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else DEFAULT_SLOT;
 
-    const rent = (try loadSysvar(
+    const rent = (try setup.loadSysvar(
         allocator,
         sysvar.Rent,
         pb_txn_ctx.account_shared_data,
     )) orelse sysvar.Rent.DEFAULT;
 
-    const epoch_schedule = (try loadSysvar(
+    const epoch_schedule = (try setup.loadSysvar(
         allocator,
         sysvar.EpochSchedule,
         pb_txn_ctx.account_shared_data,
@@ -423,39 +428,31 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     };
 }
 
-const Hash = sig.core.Hash;
-const Signature = sig.core.Signature;
-const Transaction = sig.core.Transaction;
-const TransactionVersion = sig.core.transaction.TransactionVersion;
-const TransactionMessage = sig.core.transaction.TransactionMessage;
-const TransactionInstruction = sig.core.transaction.TransactionInstruction;
-const TransactionAddressLookup = sig.core.transaction.TransactionAddressLookup;
-
-fn loadSysvar(allocator: std.mem.Allocator, comptime T: type, accounts: std.ArrayList(pb.AcctState)) !?T {
-    for (accounts.items) |acc| {
-        if (std.mem.eql(u8, acc.address.getSlice(), &T.ID.data) and acc.lamports > 0) {
-            return try sig.bincode.readFromSlice(allocator, T, acc.data.getSlice(), .{});
-        }
-    }
-    return null;
+fn generateSeed(pb_txn_ctx: pb.TxnContext) !u64 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(&pb_txn_ctx))[0..@sizeOf(pb.TxnContext)];
+    hasher.update(bytes);
+    var seed = Hash.ZEROES;
+    hasher.final(&seed.data);
+    return std.mem.bytesAsValue(u64, seed.data[0..8]).*;
 }
 
 fn parseSanitizedTransaction(
     allocator: std.mem.Allocator,
-    transaction: pb.SanitizedTransaction,
+    pb_txn: pb.SanitizedTransaction,
 ) !struct { Hash, Transaction } {
     const signatures = try allocator.alloc(
         Signature,
-        @max(transaction.signatures.items.len, 1),
+        @max(pb_txn.signatures.items.len, 1),
     );
-    for (transaction.signatures.items, 0..) |pb_signature, i|
+    for (pb_txn.signatures.items, 0..) |pb_signature, i|
         signatures[i] = .{ .data = pb_signature.getSlice()[0..Signature.SIZE].* };
-    if (transaction.signatures.items.len == 0) signatures[0] = Signature.ZEROES;
+    if (pb_txn.signatures.items.len == 0) signatures[0] = Signature.ZEROES;
 
-    const message_hash = Hash{ .data = transaction.message_hash.getSlice()[0..Hash.SIZE].* };
+    const message_hash = Hash{ .data = pb_txn.message_hash.getSlice()[0..Hash.SIZE].* };
     const version, const message = try parseTransactionMesssage(
         allocator,
-        transaction.message.?,
+        pb_txn.message.?,
     );
     return .{
         message_hash,
