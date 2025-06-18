@@ -6,16 +6,11 @@ const protobuf = @import("protobuf");
 const ELFLoaderCtx = pb.ELFLoaderCtx;
 const ElfLoaderEffects = pb.ELFLoaderEffects;
 
-const svm = sig.vm;
-const syscalls = svm.syscalls;
-const Elf = svm.Elf;
-const Executable = svm.Executable;
-const Config = svm.Config;
-const memory = svm.memory;
-const BuiltinProgram = svm.BuiltinProgram;
-const Vm = svm.Vm;
-const Registry = svm.Registry;
-const Instruction = svm.sbpf.Instruction;
+const memory = sig.vm.memory;
+const syscalls = sig.vm.syscalls;
+
+const Elf = sig.vm.Elf;
+const Executable = sig.vm.Executable;
 
 export fn sol_compat_elf_loader_v1(
     out_ptr: [*]u8,
@@ -54,8 +49,15 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .calldests = std.ArrayList(u64).init(allocator),
     };
 
-    var loader: BuiltinProgram = .{};
-    defer loader.deinit(allocator);
+    var vm_env = sig.vm.Environment{
+        .loader = .{},
+        .config = .{
+            .maximum_version = .v0,
+            .minimum_version = .v0,
+            .optimize_rodata = false,
+        },
+    };
+    defer vm_env.deinit(allocator);
 
     inline for (.{
         .{ "sol_log_", syscalls.log },
@@ -67,18 +69,12 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .{ "abort", syscalls.abort },
     }) |entry| {
         const name, const function = entry;
-        _ = try loader.functions.registerHashed(
+        _ = try vm_env.loader.registerHashed(
             allocator,
             name,
             function,
         );
     }
-
-    const config: Config = .{
-        .maximum_version = .v0,
-        .minimum_version = .v0,
-        .optimize_rodata = false,
-    };
 
     const duped_elf_bytes = try allocator.alloc(u8, ctx.elf_sz);
     @memset(duped_elf_bytes, 0);
@@ -89,7 +85,7 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
     // try output_file.writeAll(duped_elf_bytes);
     // output_file.close();
 
-    var elf = Elf.parse(allocator, duped_elf_bytes, &loader, config) catch {
+    var elf = Elf.parse(allocator, duped_elf_bytes, &vm_env.loader, vm_env.config) catch {
         return elf_effects;
     };
     errdefer elf.deinit(allocator);

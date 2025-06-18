@@ -1,14 +1,13 @@
-const std = @import("std");
+const effects = @import("effects.zig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
+const setup = @import("setup.zig");
 const sig = @import("sig");
-const utils = @import("utils.zig");
+const std = @import("std");
 
 const executor = sig.runtime.executor;
-const sysvar = sig.runtime.sysvar;
 
-const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
-const TransactionContext = sig.runtime.transaction_context.TransactionContext;
+const TransactionContext = sig.runtime.TransactionContext;
 
 const EMIT_LOGS = false;
 
@@ -27,26 +26,27 @@ export fn sol_compat_instr_execute_v1(
     defer decode_arena.deinit();
 
     const in_slice = in_ptr[0..in_size];
-    var pb_instr_ctx = pb.InstrContext.decode(
+    var pb_instruction_context = try pb.InstrContext.decode(
         in_slice,
         decode_arena.allocator(),
-    ) catch |err| {
-        std.debug.print("pb.InstrContext.decode: {s}\n", .{@errorName(err)});
-        return 0;
-    };
-    defer pb_instr_ctx.deinit();
+    );
+    defer pb_instruction_context.deinit();
 
     // utils.printPbInstrContext(pb_instr_ctx) catch |err| {
     //     std.debug.print("printPbInstrContext: {s}\n", .{@errorName(err)});
     //     return 0;
     // };
 
-    const result = executeInstruction(allocator, pb_instr_ctx, EMIT_LOGS) catch |err| {
+    const result = executeInstruction(
+        allocator,
+        &pb_instruction_context,
+        EMIT_LOGS,
+    ) catch |err| {
         std.debug.print("executeInstruction: {s}\n", .{@errorName(err)});
         return 0;
     };
 
-    // printPbInstrEffects(result) catch |err| {
+    // @import("print.zig").printPbInstrEffects(result) catch |err| {
     //     std.debug.print("printPbInstrEffects: {s}\n", .{@errorName(err)});
     //     return 0;
     // };
@@ -68,48 +68,59 @@ export fn sol_compat_instr_execute_v1(
     return 1;
 }
 
-fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
-    var tc: TransactionContext = undefined;
-    try utils.createTransactionContext(
+fn executeInstruction(
+    allocator: std.mem.Allocator,
+    instruction_context: *const pb.InstrContext,
+    emit_logs: bool,
+) !pb.InstrEffects {
+    var loaded_accounts = try setup.loadAccounts(
         allocator,
-        pb_instr_ctx,
-        .{},
-        &tc,
+        instruction_context,
     );
-    defer utils.deinitTransactionContext(allocator, tc);
+    defer {
+        for (loaded_accounts.values()) |acc| allocator.free(acc.data);
+        loaded_accounts.deinit(allocator);
+    }
 
-    if (pb_instr_ctx.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
-    const instr_info = try utils.createInstructionInfo(
+    var transaction_context: TransactionContext = undefined;
+    try setup.createTransactionContext(
         allocator,
-        &tc,
-        .{ .data = pb_instr_ctx.program_id.getSlice()[0..Pubkey.SIZE].* },
-        pb_instr_ctx.data.getSlice(),
-        pb_instr_ctx.instr_accounts.items,
+        &transaction_context,
+        &loaded_accounts,
+        instruction_context,
+        null,
     );
-    defer instr_info.deinit(allocator);
+    defer setup.deinitTransactionContext(allocator, transaction_context);
+
+    const instruction_info = try setup.createInstructionInfo(
+        allocator,
+        &transaction_context,
+        instruction_context,
+    );
+    defer instruction_info.deinit(allocator);
 
     var result: ?InstructionError = null;
     executor.executeInstruction(
         allocator,
-        &tc,
-        instr_info,
+        &transaction_context,
+        instruction_info,
     ) catch |err| {
         switch (err) {
-            error.OutOfMemory => return err,
+            error.OutOfMemory => return error.OutOfMemory,
             else => |e| result = e,
         }
     };
 
     if (emit_logs) {
         std.debug.print("Execution Logs:\n", .{});
-        for (tc.log_collector.?.collect(), 1..) |msg, index| {
+        for (transaction_context.log_collector.?.collect(), 1..) |msg, index| {
             std.debug.print("    {}: {s}\n", .{ index, msg });
         }
     }
 
-    return utils.createInstrEffects(
+    return effects.createInstrEffects(
         allocator,
-        &tc,
+        &transaction_context,
         result,
     );
 }

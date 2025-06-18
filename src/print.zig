@@ -5,12 +5,9 @@ const sig = @import("sig");
 const ManagedString = @import("protobuf").ManagedString;
 
 const features = sig.runtime.features;
-const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 const memory = sig.vm.memory;
 
-const EbpfError = sig.vm.EbpfError;
-const SyscallError = sig.vm.SyscallError;
 const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
@@ -22,8 +19,6 @@ const EpochStakes = sig.core.stake.EpochStakes;
 const Pubkey = sig.core.Pubkey;
 
 const intFromInstructionError = sig.core.instruction.intFromInstructionError;
-
-const EMIT_LOGS = false;
 
 pub fn createTransactionContext(
     allocator: std.mem.Allocator,
@@ -140,10 +135,7 @@ pub fn createTransactionContextAccounts(
     }
 
     var accounts = std.ArrayList(TransactionContextAccount).init(allocator);
-    errdefer {
-        for (accounts.items) |account| account.deinit(allocator);
-        accounts.deinit();
-    }
+    errdefer accounts.deinit();
 
     for (pb_accounts) |pb_account| {
         const account_data = try allocator.dupe(u8, pb_account.data.getSlice());
@@ -297,9 +289,9 @@ pub fn createSysvarCache(
             }
         }
     }
-    if (sysvar_cache.fees == null) {
+    if (sysvar_cache.fees_obj == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.Fees.ID)) |fees_data| {
-            sysvar_cache.fees = sig.bincode.readFromSlice(
+            sysvar_cache.fees_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.Fees,
                 fees_data,
@@ -307,9 +299,13 @@ pub fn createSysvarCache(
             ) catch null;
         }
     }
-    if (sysvar_cache.recent_blockhashes == null) {
-        if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
-            sysvar_cache.recent_blockhashes = sig.bincode.readFromSlice(
+    if (sysvar_cache.recent_blockhashes_obj == null) {
+        if (try cloneSysvarData(
+            allocator,
+            ctx,
+            sysvar.RecentBlockhashes.ID,
+        )) |recent_blockhashes_data| {
+            sysvar_cache.recent_blockhashes_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.RecentBlockhashes,
                 recent_blockhashes_data,
@@ -320,7 +316,11 @@ pub fn createSysvarCache(
     return sysvar_cache;
 }
 
-fn cloneSysvarData(allocator: std.mem.Allocator, ctx: pb.InstrContext, pubkey: Pubkey) !?[]const u8 {
+fn cloneSysvarData(
+    allocator: std.mem.Allocator,
+    ctx: pb.InstrContext,
+    pubkey: Pubkey,
+) !?[]const u8 {
     for (ctx.accounts.items) |acc| {
         if (acc.lamports > 0 and std.mem.eql(u8, acc.address.getSlice(), &pubkey.data)) {
             return try allocator.dupe(u8, acc.data.getSlice());
@@ -353,7 +353,10 @@ fn intFromResult(result: ?InstructionError) i32 {
         0;
 }
 
-fn modifiedAccounts(allocator: std.mem.Allocator, tc: *const TransactionContext) !std.ArrayList(pb.AcctState) {
+fn modifiedAccounts(
+    allocator: std.mem.Allocator,
+    tc: *const TransactionContext,
+) !std.ArrayList(pb.AcctState) {
     var accounts = std.ArrayList(pb.AcctState).init(allocator);
     errdefer accounts.deinit();
 
@@ -437,7 +440,10 @@ pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
     @memcpy(dst[0..size], prefix[0..size]);
 }
 
-pub fn extractInputDataRegions(allocator: std.mem.Allocator, memory_map: memory.MemoryMap) !std.ArrayList(pb.InputDataRegion) {
+pub fn extractInputDataRegions(
+    allocator: std.mem.Allocator,
+    memory_map: memory.MemoryMap,
+) !std.ArrayList(pb.InputDataRegion) {
     var regions = std.ArrayList(pb.InputDataRegion).init(allocator);
     errdefer regions.deinit();
 
@@ -541,8 +547,12 @@ pub fn printPbVmContext(ctx: pb.VmContext) !void {
     try writer.writeAll("VmContext {");
     try std.fmt.format(writer, "\n\theap_max: {}", .{ctx.heap_max});
     try std.fmt.format(writer, ",\n\trodata: {any}", .{ctx.rodata.getSlice()});
-    try std.fmt.format(writer, ",\n\trodata_text_section_offset: {}", .{ctx.rodata_text_section_offset});
-    try std.fmt.format(writer, ",\n\trodata_text_section_length: {}", .{ctx.rodata_text_section_length});
+    try std.fmt.format(writer, ",\n\trodata_text_section_offset: {}", .{
+        ctx.rodata_text_section_offset,
+    });
+    try std.fmt.format(writer, ",\n\trodata_text_section_length: {}", .{
+        ctx.rodata_text_section_length,
+    });
     try writer.writeAll(",\n\tinput_data_regions: [");
     for (ctx.input_data_regions.items) |region| {
         try writer.writeAll("\n\t\tInputDataRegion {");

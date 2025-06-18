@@ -1,6 +1,5 @@
 const std = @import("std");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
-const protobuf = @import("protobuf");
 const sig = @import("sig");
 
 const Shred = sig.ledger.shred.Shred;
