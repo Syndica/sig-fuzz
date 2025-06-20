@@ -85,6 +85,8 @@ fn executeVmTest(
     }
 
     var feature_set = try setup.loadFeatureSet(allocator, &instr_context);
+    try setup.toggleDirectMapping(allocator, &feature_set);
+
     var tc: TransactionContext = undefined;
     try setup.createTransactionContext(
         allocator,
