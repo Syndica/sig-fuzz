@@ -24,6 +24,16 @@ const LogCollector = sig.runtime.LogCollector;
 
 const ManagedString = protobuf.ManagedString;
 
+pub fn toggleDirectMapping(allocator: std.mem.Allocator, feature_set: *FeatureSet) !void {
+    if (try std.process.hasEnvVar(allocator, "TOGGLE_DIRECT_MAPPING")) {
+        if (feature_set.active.contains(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING)) {
+            _ = feature_set.active.swapRemove(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING);
+        } else {
+            try feature_set.active.put(allocator, features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
+        }
+    }
+}
+
 pub fn copyPrefix(dst: []u8, prefix: []const u8) void {
     const size = @min(dst.len, prefix.len);
     @memcpy(dst[0..size], prefix[0..size]);

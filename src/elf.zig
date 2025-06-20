@@ -2,6 +2,7 @@ const std = @import("std");
 const sig = @import("sig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
 const protobuf = @import("protobuf");
+const setup = @import("setup.zig");
 
 const ELFLoaderCtx = pb.ELFLoaderCtx;
 const ElfLoaderEffects = pb.ELFLoaderEffects;
@@ -40,52 +41,58 @@ export fn sol_compat_elf_loader_v1(
     return try encode(elf_effects, allocator, out_ptr, out_size);
 }
 
+const features = sig.runtime.features;
+
+const FeatureSet = sig.runtime.FeatureSet;
+const Pubkey = sig.core.Pubkey;
+
+const ACTIVE_FEATURES = [_]Pubkey{
+    features.SWITCH_TO_NEW_ELF_PARSER,
+    features.ERROR_ON_SYSCALL_BPF_FUNCTION_HASH_COLLISIONS,
+    features.BPF_ACCOUNT_DATA_DIRECT_MAPPING,
+};
+
 fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEffects {
-    const ctx_elf = ctx.elf orelse return error.Unknown;
-    const elf_bytes = ctx_elf.data.getSlice();
-    if (elf_bytes.len != ctx.elf_sz) return error.Unknown;
+    errdefer |err| std.debug.print("executeElfTest error: {s}\n", .{@errorName(err)});
+
+    const elf_bytes = if (ctx.elf) |elf|
+        elf.data.getSlice()
+    else
+        return error.NoElf;
+
+    var feature_set = FeatureSet.EMPTY;
+    defer feature_set.deinit(allocator);
+
+    for (ACTIVE_FEATURES) |feature| {
+        try feature_set.active.put(allocator, feature, 0);
+    }
+
+    try setup.toggleDirectMapping(allocator, &feature_set);
+
+    const compute_budget = sig.runtime.ComputeBudget.default(1_400_000);
+
+    const environment = try sig.vm.Environment.initV1(
+        allocator,
+        &feature_set,
+        &compute_budget,
+        false,
+        ctx.deploy_checks,
+    );
+    defer environment.deinit(allocator);
 
     var elf_effects: ElfLoaderEffects = .{
         .calldests = std.ArrayList(u64).init(allocator),
     };
 
-    var vm_env = sig.vm.Environment{
-        .loader = .{},
-        .config = .{
-            .maximum_version = .v0,
-            .minimum_version = .v0,
-            .optimize_rodata = false,
-        },
-    };
-    defer vm_env.deinit(allocator);
-
-    inline for (.{
-        .{ "sol_log_", syscalls.log },
-        .{ "sol_log_64_", syscalls.log64 },
-        .{ "sol_log_pubkey", syscalls.logPubkey },
-        .{ "sol_log_compute_units_", syscalls.logComputeUnits },
-        .{ "sol_memset_", syscalls.memops.memset },
-        .{ "sol_memcpy_", syscalls.memops.memcpy },
-        .{ "abort", syscalls.abort },
-    }) |entry| {
-        const name, const function = entry;
-        _ = try vm_env.loader.registerHashed(
-            allocator,
-            name,
-            function,
-        );
-    }
-
-    const duped_elf_bytes = try allocator.alloc(u8, ctx.elf_sz);
-    @memset(duped_elf_bytes, 0);
-    @memcpy(duped_elf_bytes.ptr, elf_bytes[0..@min(elf_bytes.len, ctx.elf_sz)]);
+    const duped_elf_bytes = try allocator.dupe(u8, elf_bytes);
     defer allocator.free(duped_elf_bytes);
 
-    // const output_file = try std.fs.cwd().createFile("out.so", .{});
-    // try output_file.writeAll(duped_elf_bytes);
-    // output_file.close();
-
-    var elf = Elf.parse(allocator, duped_elf_bytes, &vm_env.loader, vm_env.config) catch {
+    var elf = Elf.parse(
+        allocator,
+        duped_elf_bytes,
+        &environment.loader,
+        environment.config,
+    ) catch {
         return elf_effects;
     };
     errdefer elf.deinit(allocator);
