@@ -127,19 +127,17 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
         &tc,
     );
     defer utils.deinitTransactionContext(allocator, tc);
-    const syscall_registry = try sig.vm.syscalls.register(
+    var syscall_registry = try sig.vm.Environment.initV1Loader(
         allocator,
         tc.feature_set,
-        (try tc.sysvar_cache.get(sysvar.Clock)).slot,
         false,
     );
     defer syscall_registry.deinit(allocator);
 
     const reject_broken_elfs = true;
     const debugging_features = false;
-    const direct_mapping = tc.feature_set.isActive(
+    const direct_mapping = tc.feature_set.active.contains(
         features.BPF_ACCOUNT_DATA_DIRECT_MAPPING,
-        0,
     );
     const config = VmConfig{
         .max_call_depth = tc.compute_budget.max_call_depth,
@@ -310,7 +308,7 @@ fn executeSyscall(allocator: std.mem.Allocator, pb_syscall_ctx: pb.SyscallContex
     utils.copyPrefix(stack, pb_syscall_invocation.stack_prefix.getSlice());
 
     const syscall_name = pb_syscall_ctx.syscall_invocation.?.function_name.getSlice();
-    const syscall_entry = syscall_registry.functions.lookupName(syscall_name) orelse {
+    const syscall_entry = syscall_registry.lookupName(syscall_name) orelse {
         std.debug.print("Syscall not found: {s}\n", .{syscall_name});
         return error.SyscallNotFound;
     };
