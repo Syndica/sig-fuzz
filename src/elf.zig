@@ -48,7 +48,6 @@ export fn sol_compat_elf_loader_v1(
 fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEffects {
     const ctx_elf = ctx.elf orelse return error.Unknown;
     const elf_bytes = ctx_elf.data.getSlice();
-    if (elf_bytes.len != ctx.elf_sz) return error.Unknown;
 
     var elf_effects: ElfLoaderEffects = .{
         .calldests = std.ArrayList(u64).init(allocator),
@@ -80,9 +79,7 @@ fn executeElfTest(ctx: ELFLoaderCtx, allocator: std.mem.Allocator) !ElfLoaderEff
         .optimize_rodata = false,
     };
 
-    const duped_elf_bytes = try allocator.alloc(u8, ctx.elf_sz);
-    @memset(duped_elf_bytes, 0);
-    @memcpy(duped_elf_bytes.ptr, elf_bytes[0..@min(elf_bytes.len, ctx.elf_sz)]);
+    const duped_elf_bytes = try allocator.dupe(u8, elf_bytes);
     defer allocator.free(duped_elf_bytes);
 
     // const output_file = try std.fs.cwd().createFile("out.so", .{});
