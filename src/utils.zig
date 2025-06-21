@@ -100,6 +100,11 @@ pub fn deinitTransactionContext(
     tc.epoch_stakes.deinit(allocator);
     allocator.destroy(tc.epoch_stakes);
 
+    for (tc.accounts) |account| {
+        allocator.free(account.account.data);
+        allocator.destroy(account.account);
+    }
+
     tc.deinit();
 }
 
@@ -131,6 +136,8 @@ pub fn createFeatureSet(
     return feature_set;
 }
 
+const AccountSharedData = sig.runtime.AccountSharedData;
+
 pub fn createTransactionContextAccounts(
     allocator: std.mem.Allocator,
     pb_accounts: []const pb.AcctState,
@@ -141,7 +148,10 @@ pub fn createTransactionContextAccounts(
 
     var accounts = std.ArrayList(TransactionContextAccount).init(allocator);
     errdefer {
-        for (accounts.items) |account| account.deinit(allocator);
+        for (accounts.items) |account| {
+            allocator.free(account.account.data);
+            allocator.destroy(account.account);
+        }
         accounts.deinit();
     }
 
@@ -151,16 +161,20 @@ pub fn createTransactionContextAccounts(
 
         if (pb_account.owner.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
         if (pb_account.address.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
+
+        const account_ptr = try allocator.create(AccountSharedData);
+        account_ptr.* = .{
+            .lamports = pb_account.lamports,
+            .data = account_data,
+            .owner = .{ .data = pb_account.owner.getSlice()[0..Pubkey.SIZE].* },
+            .executable = pb_account.executable,
+            .rent_epoch = pb_account.rent_epoch,
+        };
+
         try accounts.append(
             TransactionContextAccount.init(
                 .{ .data = pb_account.address.getSlice()[0..Pubkey.SIZE].* },
-                .{
-                    .lamports = pb_account.lamports,
-                    .data = account_data,
-                    .owner = .{ .data = pb_account.owner.getSlice()[0..Pubkey.SIZE].* },
-                    .executable = pb_account.executable,
-                    .rent_epoch = pb_account.rent_epoch,
-                },
+                account_ptr,
             ),
         );
     }
