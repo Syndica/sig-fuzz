@@ -5,10 +5,13 @@ const utils = @import("utils.zig");
 
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
+const program_loader = sig.runtime.program_loader;
 
 const Pubkey = sig.core.Pubkey;
+const AccountSharedData = sig.runtime.AccountSharedData;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
+const ProgramMap = sig.runtime.program_loader.ProgramMap;
 
 const EMIT_LOGS = false;
 
@@ -69,14 +72,46 @@ export fn sol_compat_instr_execute_v1(
 }
 
 fn executeInstruction(allocator: std.mem.Allocator, pb_instr_ctx: pb.InstrContext, emit_logs: bool) !pb.InstrEffects {
+    const vm_environment: *sig.vm.Environment = try allocator.create(sig.vm.Environment);
+    const program_map: *ProgramMap = try allocator.create(ProgramMap);
+
     var tc: TransactionContext = undefined;
     try utils.createTransactionContext(
         allocator,
         pb_instr_ctx,
-        .{},
+        .{
+            .program_map = program_map,
+            .vm_environment = vm_environment,
+        },
         &tc,
     );
     defer utils.deinitTransactionContext(allocator, tc);
+
+    // Create an accounts map for loading programs, account data is owned by transaction context
+    // so does not need to be freed
+    var accounts_map = std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData){};
+    errdefer accounts_map.deinit(allocator);
+    for (tc.accounts) |tc_account| {
+        try accounts_map.put(allocator, tc_account.pubkey, tc_account.account.*);
+    }
+
+    // Override vm environment in the tc context
+    vm_environment.* = try sig.vm.Environment.initV1(
+        allocator,
+        tc.feature_set,
+        &tc.compute_budget,
+        false,
+        false,
+    );
+
+    // Load programs into the program map
+    const clock = try tc.sysvar_cache.get(sysvar.Clock);
+    program_map.* = try program_loader.loadPrograms(
+        allocator,
+        &accounts_map,
+        vm_environment,
+        clock.slot,
+    );
 
     if (pb_instr_ctx.program_id.getSlice().len != Pubkey.SIZE) return error.OutOfBounds;
     const instr_info = try utils.createInstructionInfo(
