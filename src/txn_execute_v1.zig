@@ -130,13 +130,13 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     const rent = (try setup.loadSysvar(
         allocator,
         sysvar.Rent,
-        pb_txn_ctx.account_shared_data,
+        pb_txn_ctx.account_shared_data.items,
     )) orelse sysvar.Rent.DEFAULT;
 
     const epoch_schedule = (try setup.loadSysvar(
         allocator,
         sysvar.EpochSchedule,
-        pb_txn_ctx.account_shared_data,
+        pb_txn_ctx.account_shared_data.items,
     )) orelse sysvar.EpochSchedule.DEFAULT;
 
     var genesis_config = GenesisConfig.default(allocator);
