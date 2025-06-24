@@ -1,6 +1,5 @@
-const effects = @import("effects.zig");
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
-const setup = @import("setup.zig");
+const setup = @import("txn_setup.zig");
 const sig = @import("sig");
 const std = @import("std");
 
@@ -12,6 +11,7 @@ const Signature = sig.core.Signature;
 const Transaction = sig.core.Transaction;
 const AccountSharedData = sig.runtime.AccountSharedData;
 
+const Ancestors = sig.core.status_cache.Ancestors;
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
@@ -56,20 +56,10 @@ export fn sol_compat_txn_execute_v1(
     };
     defer pb_txn_ctx.deinit();
 
-    // printPbTxnContext(ctx) catch |err| {
-    //     std.debug.print("printPbTxnContext: {s}\n", .{@errorName(err)});
-    //     return 0;
-    // };
-
     const result = executeTxnContext(allocator, pb_txn_ctx, EMIT_LOGS) catch |err| {
         std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
         return 0;
     };
-
-    // printPbTxnEffects(result) catch |err| {
-    //     std.debug.print("printPbTxnEffects: {s}\n", .{@errorName(err)});
-    //     return 0;
-    // };
 
     const result_bytes = try result.encode(allocator);
     defer allocator.free(result_bytes);
@@ -88,179 +78,192 @@ export fn sol_compat_txn_execute_v1(
     return 1;
 }
 
-/// feature_set: FeatureSet <- Toggle Direct Mapping <- TxnContext.EpochContext.Features
-/// fee_collector: Pubkey <- Pubkey::new_unique()
-/// slot: u64 <- TxnContext.SlotContext.Slot | 10
-/// rent: Rent <- TxnContext.[]Accounts.Rent | Rent::default()
-/// epoch_schedule: EpochSchedule <- TxnContext[]Accounts.EpochSchedule | EpochSchedule::default()
-/// genesis_config: GenesisConfig <- GenesisConfig.accounts.add(alut.id & config.id) <- GenesisConfig{creation_time: 0, rent, epoch_schedule, ..default()})
-/// blockhashqueue: BlockhashQueue <- TxnContext.BlockhashQueue | [[[0; 32]]]
-/// genesis_hash: Hash <- blockhashqueue.root()
-///
-/// bank_forks: BankForks <- BankForks::new_rc_arc( Bank::new_with_paths(...))
-/// bank: Bank <- bank_forks.root()
-/// account_keys: []Pubkey <- TxnContext.SanitizedTransaction.TransactionMessage.[]Pubkey
-/// lamports_per_signature: u64 <- TxnContext[]Accounts.RecentBlockhashes.lamports_per_signature | None
-/// message: TransactionMessage <- build_versioned_message(TxnContext.SantizedTransaction.TransactionMessage)
-/// signatures: []Signature <- TxnContext.SanitizedTransaction.Signatures
-/// versioned_transaction: VersionedTransaction <- VersionedTransaction{signatures, transactions}
-/// sanitized_transaction: SanitizedTransaction <- bank.verify(versioned_transaction)
-/// batch: TransactionBatch <- bank.prepare_sanitized_batch([sanitized_transactin])
-/// recording_config
-/// timings
-/// config
-/// metrics
-/// result: TransactionProcessingResult <- bank.load_and_execute_transactions(batch, ...)
-/// txn_result: TxnResult <- convert result to TxnResult
-const DEFAULT_SLOT: u64 = 10; // Arbitrary default > 10
+const FEE_COLLECTOR_PUBKEY = Pubkey.parseBase58String("1111111111111111111111111111111111") catch unreachable;
+const DEFAULT_SLOT: u64 = 10;
 
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
+    // TxnContext (Flattened)
+    // slot: u64
+    // features: ?Features
+    // blockhash_queue: ArrayList(ManagedString)
+    // account_shared_data: ArrayList(AccountSharedData)
+    // sanitized_transaction: SanitizedTransaction
+
     errdefer |err| {
         std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
         if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
     }
     var prng = std.Random.DefaultPrng.init(try generateSeed(pb_txn_ctx));
 
-    const feature_set = try setup.loadFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
+    var feature_set = try setup.loadFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
     defer feature_set.deinit(allocator);
 
-    // TODO: Toggle direct mapping
+    try setup.toggleDirectMapping(allocator, &feature_set);
 
-    const fee_collector = Pubkey.initRandom(prng.random());
-    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else DEFAULT_SLOT;
-
-    const rent = (try setup.loadSysvar(
+    const genesis_config = try setup.initGenesisConfig(
         allocator,
-        sysvar.Rent,
         pb_txn_ctx.account_shared_data.items,
-    )) orelse sysvar.Rent.DEFAULT;
-
-    const epoch_schedule = (try setup.loadSysvar(
-        allocator,
-        sysvar.EpochSchedule,
-        pb_txn_ctx.account_shared_data.items,
-    )) orelse sysvar.EpochSchedule.DEFAULT;
-
-    var genesis_config = GenesisConfig.default(allocator);
+    );
     defer genesis_config.deinit(allocator);
 
-    genesis_config.creation_time = 0;
-    genesis_config.rent = rent;
-    genesis_config.epoch_schedule = epoch_schedule;
-
-    var blockhashes = std.ArrayList(Hash).init(allocator);
-    defer blockhashes.deinit();
-
-    for (pb_txn_ctx.blockhash_queue.items) |pb_blockhash| {
-        const blockhash = Hash{ .data = pb_blockhash.getSlice()[0..Hash.SIZE].* };
-        try blockhashes.append(blockhash);
-    }
-
-    if (blockhashes.items.len == 0) try blockhashes.append(Hash.ZEROES);
-
-    const genesis_hash = blockhashes.items[0];
-
-    const snapshot_dir_name = try std.fmt.allocPrint(
+    const blockhashes = try setup.loadBlockhashes(
         allocator,
-        "snapshot-dir-{}",
-        .{prng.random().int(u64)},
+        pb_txn_ctx.blockhash_queue.items,
     );
-    defer allocator.free(snapshot_dir_name);
-    try std.fs.cwd().makeDir(snapshot_dir_name);
-    defer std.fs.cwd().deleteTree(snapshot_dir_name) catch {};
-    const snapshot_dir = try std.fs.cwd().openDir(
-        snapshot_dir_name,
-        .{ .iterate = true },
-    );
+    defer allocator.free(blockhashes);
 
-    var accounts_db = try sig.accounts_db.AccountsDB.init(.{
-        .allocator = allocator,
-        .logger = .noop,
-        .snapshot_dir = snapshot_dir,
-        .geyser_writer = null,
-        .gossip_view = null,
-        .index_allocation = .ram,
-        .number_of_index_shards = 1,
-        .buffer_pool_frames = 1024,
-    });
-    defer accounts_db.deinit();
-
-    const accounts = try allocator.alloc(sig.core.Account, pb_txn_ctx.account_shared_data.items.len);
-    defer allocator.free(accounts);
-    const keys = try allocator.alloc(Pubkey, pb_txn_ctx.account_shared_data.items.len);
-    defer allocator.free(keys);
-    for (pb_txn_ctx.account_shared_data.items, 0..) |account, i| {
-        accounts[i] = .{
-            .data = .initAllocated(account.data.getSlice()),
-            .executable = account.executable,
-            .owner = Pubkey{ .data = account.owner.getSlice()[0..Pubkey.SIZE].* },
-            .lamports = account.lamports,
-            .rent_epoch = account.rent_epoch,
-        };
-        keys[i] = Pubkey{ .data = account.address.getSlice()[0..Pubkey.SIZE].* };
+    var loaded_accounts = std.AutoArrayHashMap(Pubkey, struct { u64, AccountSharedData }){};
+    defer {
+        for (loaded_accounts.values()) |v| v[1].data.deinit(allocator);
+        loaded_accounts.deinit(allocator);
     }
+    try setup.loadBuiltins(allocator, &loaded_accounts);
+    try setup.loadPrecompiles(allocator, &loaded_accounts);
 
-    std.debug.print("Putting accounts into AccountsDB\n", .{});
-    for (keys, accounts) |key, account| {
-        std.debug.print("{} {} {any}\n", .{ slot, key, account });
-    }
+    // // genesis needs stakes for all epochs up to the epoch implied by
+    // //  slot = 0 and genesis configuration
+    // {
+    //     let stakes = bank.stakes_cache.stakes().clone();
+    //     let stakes = Arc::new(StakesEnum::from(stakes));
+    //     for epoch in 0..=bank.get_leader_schedule_epoch(bank.slot) {
+    //         bank.epoch_stakes
+    //             .insert(epoch, EpochStakes::new(stakes.clone(), epoch));
+    //     }
+    //     bank.update_stake_history(None);
+    // }
+    // bank.update_clock(None);
+    // bank.update_rent();
+    // bank.update_epoch_schedule();
+    // bank.update_recent_blockhashes();
+    // bank.update_last_restart_slot();
 
-    try accounts_db.putAccountSlice(
-        accounts,
-        keys,
-        slot,
-    );
+    // var loaded_accounts = std.AutoArrayHashMap(Pubkey, struct { u64, AccountSharedData }){};
+    // defer {
+    //     for (loaded_accounts.values()) |v| v[1].data.deinit(allocator);
+    //     loaded_accounts.deinit(allocator);
+    // }
 
-    const rkeys = [_]Pubkey{
-        Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("BPFLoader1111111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("BPFLoader2111111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("BPFLoaderUpgradeab1e11111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("ComputeBudget111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("Config1111111111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("Ed25519SigVerify111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("KeccakSecp256k11111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("Stake11111111111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("SysvarC1ock11111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("SysvarEpochSchedu1e111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("SysvarRent111111111111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("SysvarStakeHistory1111111111111111111111111") catch unreachable,
-        Pubkey.parseBase58String("Vote111111111111111111111111111111111111111") catch unreachable,
-    };
-    std.debug.print("Bank Accounts:\n", .{});
-    for (rkeys) |key| {
-        _ = accounts_db.getAccount(&key) catch {
-            std.debug.print("{} not found\n", .{key});
-            continue;
-        };
-        std.debug.print("{}\n", .{key});
-    }
+    var ancestors = Ancestors{};
+    defer ancestors.deinit(allocator);
+    try ancestors.ancestors.put(allocator, 0, {});
 
-    // TODO: Analogous Bank setup
+    const fee_rate_govenor = genesis_config.fee_rate_governor;
+    // for (genesis_config.accounts.iterator()) |item| {
+    //     // put accounts
+    //     _ = item;
+    // }
+    // for (genesis_config.rewards_pools.iterator()) |item| {
+    //     // put rewards pools
+    //     _ = item;
+    // }
 
-    const sanitized_transaction = try parseSanitizedTransaction(
+    var blockhahs_queue = sig.core.bank.BlockhashQueue{};
+    defer blockhahs_queue.deinit(allocator);
+    try blockhahs_queue.insertGenesisHash(
         allocator,
-        pb_txn_ctx.tx.?,
+        blockhashes[0],
+        fee_rate_govenor.lamports_per_signature,
     );
-    defer sanitized_transaction.deinit(allocator);
 
-    const serialized_msg = sanitized_transaction.msg.serializeBounded(
-        sanitized_transaction.version,
+    // READ SLOT
+    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else DEFAULT_SLOT;
+    std.debug.print("Slot: {d}\n", .{slot});
+
+    if (slot > 0) {
+        try ancestors.ancestors.put(allocator, slot, {});
+        fee_rate_govenor = FeeRateGovernor.initDerived(&fee_rate_govenor, 0);
+    }
+    std.debug.print("Ancestors: {any}\n", .{ancestors.ancestors.keys()});
+
+    // Load accounts and sysvars
+    const sysvar_cache = SysvarCache{};
+
+    _ = sysvar_cache;
+    _ = emit_logs;
+
+    return .{};
+
+    // const sanitized_transaction = try parseSanitizedTransaction(
+    //     allocator,
+    //     pb_txn_ctx.tx.?,
+    // );
+    // defer sanitized_transaction.deinit(allocator);
+
+    // const verify_transaction_result = try verifyTransaction(
+    //     allocator,
+    //     sanitized_transaction,
+    //     &feature_set,
+    //     &accounts_db,
+    // );
+
+    // const runtime_transaction: RuntimeTransaction = switch (verify_transaction_result) {
+    //     .ok => |txn| txn,
+    //     .err => |err| return err,
+    // };
+
+    // _ = runtime_transaction;
+    // _ = emit_logs;
+
+    // const environment = TransactionExecutionEnvironment{
+    //     .ancestors = &ancestors,
+    //     .feature_set = &feature_set,
+    //     .status_cache = undefined,
+    //     .sysvar_cache = undefined,
+    //     .rent_collector = undefined,
+    //     .blockhash_queue = undefined,
+    //     .epoch_stakes = undefined,
+
+    //     .max_age = 150, // MAX_PROCESSING_AGE
+    //     .last_blockhash = undefined,
+    //     .next_durable_nonce = undefined,
+    //     .next_lamports_per_signature = undefined,
+    //     .last_lamports_per_signature = undefined,
+    //     .lamports_per_signature = undefined,
+    // };
+
+    // const config = TransactionExecutionConfig{
+    //     .log = true,
+    //     .log_messages_byte_limit = null,
+    // };
+
+    // const result = try loadAndExecuteTransaction(
+    //     allocator,
+    //     &runtime_transaction,
+    //     &account_cache,
+    //     &environment,
+    //     &config,
+    // );
+}
+
+const VerifyTransactionResult = union(enum(u8)) {
+    ok: RuntimeTransaction,
+    err: pb.TxnResult,
+};
+
+const FeatureSet = sig.runtime.FeatureSet;
+const AccountsDb = sig.accounts_db.AccountsDB;
+
+fn verifyTransaction(
+    allocator: std.mem.Allocator,
+    transaction: Transaction,
+    feature_set: *const FeatureSet,
+    accounts_db: *AccountsDb,
+) !VerifyTransactionResult {
+    const serialized_msg = transaction.msg.serializeBounded(
+        transaction.version,
     ) catch {
         std.debug.print("SanitizedTransaction.msg.serializeBounded failed\n", .{});
-        return .{
+        return .{ .err = .{
             .sanitization_error = true,
             .status = transactionErrorToInt(.SanitizeFailure),
-        };
+        } };
     };
     const msg_hash = sig.core.transaction.Message.hash(serialized_msg.slice());
 
     if (!feature_set.active.contains(features.MOVE_PRECOMPILE_VERIFICATION_TO_SVM)) {
         const maybe_verify_error = try sig.runtime.program.precompiles.verifyPrecompiles(
             allocator,
-            sanitized_transaction,
+            transaction,
             feature_set,
         );
         if (maybe_verify_error) |verify_error| {
@@ -276,21 +279,21 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 },
                 else => .{ 0, 0, 0 },
             };
-            return .{
+            return .{ .err = .{
                 .sanitization_error = true,
                 .status = transactionErrorToInt(verify_error),
                 .instruction_error = instr_err,
                 .instruction_error_index = instr_idx,
                 .custom_error = custom_err,
-            };
+            } };
         }
     }
 
     const resolved_batch = sig.replay.resolve_lookup.resolveBatch(
         allocator,
         // NOTE: Need ancestors to load with fixed root
-        &accounts_db,
-        &.{sanitized_transaction},
+        accounts_db,
+        &.{transaction},
     ) catch |err| {
         const err_code = switch (err) {
             error.Overflow => 123456,
@@ -302,206 +305,23 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             error.InvalidAddressLookupTableIndex => transactionErrorToInt(.InvalidAddressLookupTableIndex),
         };
         std.debug.print("resolve_lookup.resolveBatch failed\n", .{});
-        return .{
+        return .{ .err = .{
             .sanitization_error = true,
             .status = err_code,
-        };
+        } };
     };
     defer resolved_batch.deinit(allocator);
 
     const resolved_txn = resolved_batch.transactions[0];
-    const runtime_batch = &[_]RuntimeTransaction{.{
+
+    return .{ .ok = .{
         .signature_count = resolved_txn.transaction.signatures.len,
         .fee_payer = resolved_txn.transaction.msg.account_keys[0],
         .msg_hash = msg_hash,
         .recent_blockhash = resolved_txn.transaction.msg.recent_blockhash,
         .instruction_infos = resolved_txn.instructions,
         .accounts = resolved_txn.accounts,
-    }};
-
-    std.debug.print("Successfully parsed transaction\n", .{});
-
-    _ = emit_logs;
-    _ = fee_collector;
-    _ = genesis_hash;
-    _ = runtime_batch;
-
-    // TODO: Replay Verify Transaction producing a RuntimeTransaction
-
-    // Genesis Config -> Default(context epoch schedule, context rent, ...)
-    //     - Add dummy ALUT and Config accounts to genesis config initial accounts
-    // Genesis Hash -> Root of context blockhash queue
-
-    // var batch_account_cache = BatchAccountCache{};
-    // var sysvar_cache = SysvarCache{};
-    // const environment = TransactionExecutionEnvironment{
-    //     .ancestors = undefined,
-    //     .feature_set = &feature_set,
-    //     .status_cache = undefined,
-    //     .sysvar_cache = undefined,
-    //     .rent_collector = undefined,
-    //     .blockhash_queue = undefined,
-    //     .epoch_stakes = undefined,
-
-    //     .max_age = undefined,
-    //     .last_blockhash = undefined,
-    //     .next_durable_nonce = undefined,
-    //     .next_lamports_per_signature = undefined,
-    //     .last_lamports_per_signature = undefined,
-    //     .lamports_per_signature = undefined,
-    // };
-
-    // const config = TransactionExecutionConfig{
-    //     .log = true,
-    //     .log_messages_byte_limit = null,
-    //     // .account_overrides: None,
-    //     // .compute_budget: bank.compute_budget(),
-    //     // .log_messages_bytes_limit: None,
-    //     // .limit_to_load_programs: true,
-    //     // .recording_config,
-    //     // .transaction_account_lock_limit: None,
-    //     // .check_program_modification_slot: false,
-    // };
-
-    // const runtime_transaction = RuntimeTransaction{
-    //     .signature_count = undefined,
-    //     .fee_payer = undefined,
-    //     .msg_hash = msg_hash,
-    //     .recent_blockhash = sanitized_transaction.msg.recent_blockhash,
-    //     .instruction_infos = undefined,
-    //     .accounts = undefined,
-    // };
-
-    // const result = try loadAndExecuteTransaction(
-    //     allocator,
-    //     &runtime_transaction,
-    //     &batch_account_cache,
-    //     &environment,
-    //     &config,
-    // );
-
-    // switch (result) {
-    //     .ok => |transaction| {
-    //         _ = transaction;
-    //         // let is_ok = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => {
-    //         //         executed_tx.execution_details.status.is_ok()
-    //         //     }
-    //         //     ProcessedTransaction::FeesOnly(_) => false,
-    //         // };
-
-    //         // let loaded_accounts_data_size = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => {
-    //         //         executed_tx.loaded_transaction.loaded_accounts_data_size
-    //         //     }
-    //         //     ProcessedTransaction::FeesOnly(fees_only_tx) => {
-    //         //         fees_only_tx.rollback_accounts.data_size() as u32
-    //         //     }
-    //         // };
-
-    //         // let (status, instr_err, custom_err, instr_err_idx) =
-    //         //     match txn.status().as_ref().map_err(transaction_error_to_err_nums) {
-    //         //         Ok(_) => (0, 0, 0, 0),
-    //         //         Err((status, instr_err, custom_err, instr_err_idx)) => {
-    //         //             // Set custom err to 0 if the failing instruction is a precompile
-    //         //             let custom_err_ret = sanitized_message
-    //         //                 .instructions()
-    //         //                 .get(instr_err_idx as usize)
-    //         //                 .and_then(|instr| {
-    //         //                     sanitized_message
-    //         //                         .account_keys()
-    //         //                         .get(instr.program_id_index as usize)
-    //         //                         .map(|program_id| {
-    //         //                             if get_precompile(program_id, |_| true).is_some() {
-    //         //                                 0
-    //         //                             } else {
-    //         //                                 custom_err
-    //         //                             }
-    //         //                         })
-    //         //                 })
-    //         //                 .unwrap_or(custom_err);
-    //         //             (status, instr_err, custom_err_ret, instr_err_idx)
-    //         //         }
-    //         //     };
-    //         // let rent = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => executed_tx.loaded_transaction.rent,
-    //         //     ProcessedTransaction::FeesOnly(_) => 0,
-    //         // };
-    //         // let resulting_state: Option<ResultingState> = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => {
-    //         //         Some(executed_tx.loaded_transaction.clone().into())
-    //         //     }
-    //         //     ProcessedTransaction::FeesOnly(tx) => {
-    //         //         let mut accounts = Vec::with_capacity(tx.rollback_accounts.count());
-    //         //         collect_accounts_for_failed_tx(
-    //         //             &mut accounts,
-    //         //             &mut None,
-    //         //             sanitized_message,
-    //         //             None,
-    //         //             &tx.rollback_accounts,
-    //         //         );
-    //         //         Some(ResultingState {
-    //         //             acct_states: accounts
-    //         //                 .iter()
-    //         //                 .map(|&(pubkey, acct)| (*pubkey, acct.clone()).into())
-    //         //                 .collect(),
-    //         //             rent_debits: vec![],
-    //         //             transaction_rent: 0,
-    //         //         })
-    //         //     }
-    //         // };
-    //         // let executed_units = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => {
-    //         //         executed_tx.execution_details.executed_units
-    //         //     }
-    //         //     ProcessedTransaction::FeesOnly(_) => 0,
-    //         // };
-    //         // let return_data = match txn {
-    //         //     ProcessedTransaction::Executed(executed_tx) => executed_tx
-    //         //         .execution_details
-    //         //         .return_data
-    //         //         .as_ref()
-    //         //         .map(|info| info.clone().data)
-    //         //         .unwrap_or_default(),
-    //         //     ProcessedTransaction::FeesOnly(_) => vec![],
-    //         // };
-    //         // (
-    //         //     is_ok,
-    //         //     false,
-    //         //     status,
-    //         //     instr_err,
-    //         //     instr_err_idx,
-    //         //     custom_err,
-    //         //     executed_units,
-    //         //     return_data,
-    //         //     Some(txn.fee_details()),
-    //         //     rent,
-    //         //     loaded_accounts_data_size,
-    //         //     resulting_state,
-    //         // )
-    //     },
-    //     .err => |err| {
-    //         _ = err;
-    //         // let (status, instr_err, custom_err, instr_err_idx) =
-    //         //     transaction_error_to_err_nums(transaction_error);
-    //         // (
-    //         //     false,
-    //         //     true,
-    //         //     status,
-    //         //     instr_err,
-    //         //     instr_err_idx,
-    //         //     custom_err,
-    //         //     0,
-    //         //     vec![],
-    //         //     None,
-    //         //     0,
-    //         //     0,
-    //         //     None,
-    //         // )
-    //     },
-    // }
-
-    return .{};
+    } };
 }
 
 fn generateSeed(pb_txn_ctx: pb.TxnContext) !u64 {
@@ -654,3 +474,37 @@ fn transactionErrorToInt(err: sig.ledger.transaction_status.TransactionError) u3
         .ProgramCacheHitMaxLimit => 38,
     };
 }
+
+// var initial_accounts = std.AutoArrayHashMap(Pubkey, AccountSharedData){};
+// defer {
+//     for (initial_accounts.values()) |v| allocator.free(v.data);
+//     initial_accounts.deinit(allocator);
+// }
+
+// for (genesis_config.accounts.keyIterator(), genesis_config.accounts.valueIterator()) |key, account| {
+//     try initial_accounts.put(key, account);
+// }
+// for (genesis_config.rewards_pools.keyIterator(), genesis_config.rewards_pools.valueIterator()) |key, account| {
+//     try initial_accounts.put(key, account);
+// }
+
+// const accounts = try allocator.alloc(sig.core.Account, pb_txn_ctx.account_shared_data.items.len);
+// defer allocator.free(accounts);
+// const keys = try allocator.alloc(Pubkey, pb_txn_ctx.account_shared_data.items.len);
+// defer allocator.free(keys);
+// for (pb_txn_ctx.account_shared_data.items, 0..) |account, i| {
+//     accounts[i] = .{
+//         .data = .initAllocated(account.data.getSlice()),
+//         .executable = account.executable,
+//         .owner = Pubkey{ .data = account.owner.getSlice()[0..Pubkey.SIZE].* },
+//         .lamports = account.lamports,
+//         .rent_epoch = account.rent_epoch,
+//     };
+//     keys[i] = Pubkey{ .data = account.address.getSlice()[0..Pubkey.SIZE].* };
+// }
+
+// try accounts_db.putAccountSlice(
+//     accounts,
+//     keys,
+//     slot,
+// );
