@@ -124,7 +124,7 @@ pub fn deinitTransactionContext(
     tc.vm_environment.deinit(allocator);
     allocator.destroy(tc.vm_environment);
 
-    for (tc.program_map.values()) |v| v.deinit(allocator);
+    for (tc.program_map.values()) |*v| v.deinit(allocator);
     var program_map = tc.program_map.*;
     program_map.deinit(allocator);
     allocator.destroy(tc.program_map);
