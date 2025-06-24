@@ -18,6 +18,7 @@ const TransactionContextAccount = sig.runtime.transaction_context.TransactionCon
 const FeatureSet = sig.runtime.FeatureSet;
 const SysvarCache = sig.runtime.SysvarCache;
 const EpochStakes = sig.core.stake.EpochStakes;
+const ProgramMap = sig.runtime.program_loader.ProgramMap;
 
 const Pubkey = sig.core.Pubkey;
 
@@ -32,6 +33,8 @@ pub fn createTransactionContext(
         feature_set: ?*FeatureSet = null,
         epoch_stakes: ?*EpochStakes = null,
         sysvar_cache: ?*SysvarCache = null,
+        vm_environment: ?*sig.vm.Environment = null,
+        program_map: ?*ProgramMap = null,
     },
     tc: *TransactionContext,
 ) !void {
@@ -48,17 +51,35 @@ pub fn createTransactionContext(
 
     epoch_stakes.* = try EpochStakes.initEmpty(allocator);
 
-    var sysvar_cache = if (environment.sysvar_cache) |ptr|
+    const sysvar_cache = if (environment.sysvar_cache) |ptr|
         ptr
     else
         try allocator.create(SysvarCache);
     sysvar_cache.* = try createSysvarCache(allocator, instr_ctx);
+
+    const vm_environment = if (environment.vm_environment) |ptr|
+        ptr
+    else
+        try allocator.create(sig.vm.Environment);
+    vm_environment.* = sig.vm.Environment{
+        .config = .{},
+        .loader = .{},
+    };
+
+    const program_map = if (environment.program_map) |ptr|
+        ptr
+    else
+        try allocator.create(ProgramMap);
+    program_map.* = ProgramMap{};
 
     tc.* = TransactionContext{
         .allocator = allocator,
         .feature_set = feature_set,
         .epoch_stakes = epoch_stakes,
         .sysvar_cache = sysvar_cache,
+        .vm_environment = vm_environment,
+        .next_vm_environment = vm_environment,
+        .program_map = program_map,
         .accounts = try createTransactionContextAccounts(
             allocator,
             instr_ctx.accounts.items,
@@ -94,11 +115,19 @@ pub fn deinitTransactionContext(
     tc.feature_set.deinit(allocator);
     allocator.destroy(tc.feature_set);
 
+    tc.epoch_stakes.deinit(allocator);
+    allocator.destroy(tc.epoch_stakes);
+
     tc.sysvar_cache.deinit(allocator);
     allocator.destroy(tc.sysvar_cache);
 
-    tc.epoch_stakes.deinit(allocator);
-    allocator.destroy(tc.epoch_stakes);
+    tc.vm_environment.deinit(allocator);
+    allocator.destroy(tc.vm_environment);
+
+    for (tc.program_map.values()) |v| v.deinit(allocator);
+    var program_map = tc.program_map.*;
+    program_map.deinit(allocator);
+    allocator.destroy(tc.program_map);
 
     for (tc.accounts) |account| {
         allocator.free(account.account.data);
@@ -311,9 +340,9 @@ pub fn createSysvarCache(
             }
         }
     }
-    if (sysvar_cache.fees == null) {
+    if (sysvar_cache.fees_obj == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.Fees.ID)) |fees_data| {
-            sysvar_cache.fees = sig.bincode.readFromSlice(
+            sysvar_cache.fees_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.Fees,
                 fees_data,
@@ -321,9 +350,9 @@ pub fn createSysvarCache(
             ) catch null;
         }
     }
-    if (sysvar_cache.recent_blockhashes == null) {
+    if (sysvar_cache.recent_blockhashes_obj == null) {
         if (try cloneSysvarData(allocator, ctx, sysvar.RecentBlockhashes.ID)) |recent_blockhashes_data| {
-            sysvar_cache.recent_blockhashes = sig.bincode.readFromSlice(
+            sysvar_cache.recent_blockhashes_obj = sig.bincode.readFromSlice(
                 allocator,
                 sysvar.RecentBlockhashes,
                 recent_blockhashes_data,
