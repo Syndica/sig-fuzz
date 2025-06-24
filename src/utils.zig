@@ -42,7 +42,7 @@ pub fn createTransactionContext(
         ptr
     else
         try allocator.create(FeatureSet);
-    feature_set.* = try createFeatureSet(allocator, instr_ctx);
+    feature_set.* = try createFeatureSet(allocator, instr_ctx.epoch_context);
 
     const epoch_stakes = if (environment.epoch_stakes) |ptr|
         ptr
@@ -124,7 +124,7 @@ pub fn deinitTransactionContext(
     tc.vm_environment.deinit(allocator);
     allocator.destroy(tc.vm_environment);
 
-    for (tc.program_map.values()) |v| v.deinit(allocator);
+    for (tc.program_map.values()) |*v| v.deinit(allocator);
     var program_map = tc.program_map.*;
     program_map.deinit(allocator);
     allocator.destroy(tc.program_map);
@@ -139,13 +139,13 @@ pub fn deinitTransactionContext(
 
 pub fn createFeatureSet(
     allocator: std.mem.Allocator,
-    pb_ctx: pb.InstrContext,
+    pb_ctx: ?pb.EpochContext,
 ) !features.FeatureSet {
     errdefer |err| {
         std.debug.print("createFeatureSet: error={}\n", .{err});
     }
 
-    const pb_epoch_context = pb_ctx.epoch_context orelse return features.FeatureSet.EMPTY;
+    const pb_epoch_context = pb_ctx orelse return features.FeatureSet.EMPTY;
     const pb_feature_set = pb_epoch_context.features orelse return features.FeatureSet.EMPTY;
 
     var indexed_features = std.AutoArrayHashMap(u64, Pubkey).init(allocator);

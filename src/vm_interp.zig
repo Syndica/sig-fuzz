@@ -77,7 +77,7 @@ fn executeVmTest(
     }
 
     var feature_set = try allocator.create(sig.runtime.FeatureSet);
-    feature_set.* = try utils.createFeatureSet(allocator, instr_context);
+    feature_set.* = try utils.createFeatureSet(allocator, instr_context.epoch_context);
     var tc: sig.runtime.TransactionContext = undefined;
     try utils.createTransactionContext(
         allocator,
