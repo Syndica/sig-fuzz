@@ -5,10 +5,12 @@ const sig = @import("sig");
 const std = @import("std");
 
 const sysvar = sig.runtime.sysvar;
+const features = sig.runtime.features;
 
 const Hash = sig.core.Hash;
 const Signature = sig.core.Signature;
 const Transaction = sig.core.Transaction;
+const AccountSharedData = sig.runtime.AccountSharedData;
 
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
@@ -146,22 +148,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     genesis_config.rent = rent;
     genesis_config.epoch_schedule = epoch_schedule;
 
-    try genesis_config.accounts.put(sig.runtime.program.address_lookup_table.ID, .{
-        .data = .initEmpty(0),
-        .executable = false,
-        .owner = sig.runtime.program.bpf_loader.v3.ID,
-        .lamports = 1,
-        .rent_epoch = 0,
-    });
-
-    try genesis_config.accounts.put(sig.runtime.program.config.ID, .{
-        .data = .initEmpty(0),
-        .executable = false,
-        .owner = sig.runtime.program.bpf_loader.v3.ID,
-        .lamports = 1,
-        .rent_epoch = 0,
-    });
-
     var blockhashes = std.ArrayList(Hash).init(allocator);
     defer blockhashes.deinit();
 
@@ -214,24 +200,131 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         keys[i] = Pubkey{ .data = account.address.getSlice()[0..Pubkey.SIZE].* };
     }
 
+    std.debug.print("Putting accounts into AccountsDB\n", .{});
+    for (keys, accounts) |key, account| {
+        std.debug.print("{} {} {any}\n", .{ slot, key, account });
+    }
+
     try accounts_db.putAccountSlice(
         accounts,
         keys,
         slot,
     );
 
+    const rkeys = [_]Pubkey{
+        Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("BPFLoader1111111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("BPFLoader2111111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("BPFLoaderUpgradeab1e11111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("ComputeBudget111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("Config1111111111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("Ed25519SigVerify111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("KeccakSecp256k11111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("Stake11111111111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("SysvarC1ock11111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("SysvarEpochSchedu1e111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("SysvarRent111111111111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("SysvarStakeHistory1111111111111111111111111") catch unreachable,
+        Pubkey.parseBase58String("Vote111111111111111111111111111111111111111") catch unreachable,
+    };
+    std.debug.print("Bank Accounts:\n", .{});
+    for (rkeys) |key| {
+        _ = accounts_db.getAccount(&key) catch {
+            std.debug.print("{} not found\n", .{key});
+            continue;
+        };
+        std.debug.print("{}\n", .{key});
+    }
+
     // TODO: Analogous Bank setup
 
-    const msg_hash, const sanitized_transaction = try parseSanitizedTransaction(
+    const sanitized_transaction = try parseSanitizedTransaction(
         allocator,
         pb_txn_ctx.tx.?,
     );
     defer sanitized_transaction.deinit(allocator);
 
+    const serialized_msg = sanitized_transaction.msg.serializeBounded(
+        sanitized_transaction.version,
+    ) catch {
+        std.debug.print("SanitizedTransaction.msg.serializeBounded failed\n", .{});
+        return .{
+            .sanitization_error = true,
+            .status = transactionErrorToInt(.SanitizeFailure),
+        };
+    };
+    const msg_hash = sig.core.transaction.Message.hash(serialized_msg.slice());
+
+    if (!feature_set.active.contains(features.MOVE_PRECOMPILE_VERIFICATION_TO_SVM)) {
+        const maybe_verify_error = try sig.runtime.program.precompiles.verifyPrecompiles(
+            allocator,
+            sanitized_transaction,
+            feature_set,
+        );
+        if (maybe_verify_error) |verify_error| {
+            std.debug.print("Precompile verification failed\n", .{});
+            const instr_err, const instr_idx, const custom_err = switch (verify_error) {
+                .InstructionError => |err| blk: {
+                    const instr_err = sig.core.instruction.intFromInstructionErrorEnum(err[1]);
+                    const custom_err = switch (err[1]) {
+                        .Custom => |e| e,
+                        else => 0,
+                    };
+                    break :blk .{ instr_err, err[0], custom_err };
+                },
+                else => .{ 0, 0, 0 },
+            };
+            return .{
+                .sanitization_error = true,
+                .status = transactionErrorToInt(verify_error),
+                .instruction_error = instr_err,
+                .instruction_error_index = instr_idx,
+                .custom_error = custom_err,
+            };
+        }
+    }
+
+    const resolved_batch = sig.replay.resolve_lookup.resolveBatch(
+        allocator,
+        // NOTE: Need ancestors to load with fixed root
+        &accounts_db,
+        &.{sanitized_transaction},
+    ) catch |err| {
+        const err_code = switch (err) {
+            error.Overflow => 123456,
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedVersion => transactionErrorToInt(.UnsupportedVersion),
+            error.AddressLookupTableNotFound => transactionErrorToInt(.AddressLookupTableNotFound),
+            error.InvalidAddressLookupTableOwner => transactionErrorToInt(.InvalidAddressLookupTableOwner),
+            error.InvalidAddressLookupTableData => transactionErrorToInt(.InvalidAddressLookupTableData),
+            error.InvalidAddressLookupTableIndex => transactionErrorToInt(.InvalidAddressLookupTableIndex),
+        };
+        std.debug.print("resolve_lookup.resolveBatch failed\n", .{});
+        return .{
+            .sanitization_error = true,
+            .status = err_code,
+        };
+    };
+    defer resolved_batch.deinit(allocator);
+
+    const resolved_txn = resolved_batch.transactions[0];
+    const runtime_batch = &[_]RuntimeTransaction{.{
+        .signature_count = resolved_txn.transaction.signatures.len,
+        .fee_payer = resolved_txn.transaction.msg.account_keys[0],
+        .msg_hash = msg_hash,
+        .recent_blockhash = resolved_txn.transaction.msg.recent_blockhash,
+        .instruction_infos = resolved_txn.instructions,
+        .accounts = resolved_txn.accounts,
+    }};
+
+    std.debug.print("Successfully parsed transaction\n", .{});
+
     _ = emit_logs;
     _ = fee_collector;
     _ = genesis_hash;
-    _ = msg_hash;
+    _ = runtime_batch;
 
     // TODO: Replay Verify Transaction producing a RuntimeTransaction
 
@@ -408,24 +501,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     //     },
     // }
 
-    return pb.TxnResult{
-        .executed = false,
-        .sanitization_error = false,
-        .resulting_state = .{
-            .acct_states = std.ArrayList(pb.AcctState).init(allocator),
-            .rent_debits = std.ArrayList(pb.RentDebits).init(allocator),
-            .transaction_rent = 0,
-        },
-        .rent = 0,
-        .is_ok = false,
-        .status = 0,
-        .instruction_error = 0,
-        .instruction_error_index = 0,
-        .custom_error = 0,
-        .return_data = .Empty,
-        .executed_units = 0,
-        .fee_details = null,
-    };
+    return .{};
 }
 
 fn generateSeed(pb_txn_ctx: pb.TxnContext) !u64 {
@@ -440,7 +516,7 @@ fn generateSeed(pb_txn_ctx: pb.TxnContext) !u64 {
 fn parseSanitizedTransaction(
     allocator: std.mem.Allocator,
     pb_txn: pb.SanitizedTransaction,
-) !struct { Hash, Transaction } {
+) !Transaction {
     const signatures = try allocator.alloc(
         Signature,
         @max(pb_txn.signatures.items.len, 1),
@@ -449,18 +525,14 @@ fn parseSanitizedTransaction(
         signatures[i] = .{ .data = pb_signature.getSlice()[0..Signature.SIZE].* };
     if (pb_txn.signatures.items.len == 0) signatures[0] = Signature.ZEROES;
 
-    const message_hash = Hash{ .data = pb_txn.message_hash.getSlice()[0..Hash.SIZE].* };
     const version, const message = try parseTransactionMesssage(
         allocator,
         pb_txn.message.?,
     );
     return .{
-        message_hash,
-        .{
-            .signatures = signatures,
-            .version = version,
-            .msg = message,
-        },
+        .signatures = signatures,
+        .version = version,
+        .msg = message,
     };
 }
 
@@ -529,5 +601,56 @@ fn parseTransactionMesssage(
             .instructions = instructions,
             .address_lookups = address_lookups,
         },
+    };
+}
+
+fn verifyErrorToInt(err: sig.core.transaction.Transaction.VerifyError) u32 {
+    return switch (err) {
+        error.SignatureVerificationFailed => transactionErrorToInt(.SignatureFailure),
+        error.SerializationFailed => transactionErrorToInt(.SanitizeFailure),
+        else => std.debug.panic("Should not happen: {s}", .{@errorName(err)}),
+    };
+}
+
+fn transactionErrorToInt(err: sig.ledger.transaction_status.TransactionError) u32 {
+    return switch (err) {
+        .AccountInUse => 1,
+        .AccountLoadedTwice => 2,
+        .AccountNotFound => 3,
+        .ProgramAccountNotFound => 4,
+        .InsufficientFundsForFee => 5,
+        .InvalidAccountForFee => 6,
+        .AlreadyProcessed => 7,
+        .BlockhashNotFound => 8,
+        .InstructionError => |_| 9,
+        .CallChainTooDeep => 10,
+        .MissingSignatureForFee => 11,
+        .InvalidAccountIndex => 12,
+        .SignatureFailure => 13,
+        .InvalidProgramForExecution => 14,
+        .SanitizeFailure => 15,
+        .ClusterMaintenance => 16,
+        .AccountBorrowOutstanding => 17,
+        .WouldExceedMaxBlockCostLimit => 18,
+        .UnsupportedVersion => 19,
+        .InvalidWritableAccount => 20,
+        .WouldExceedMaxAccountCostLimit => 21,
+        .WouldExceedAccountDataBlockLimit => 22,
+        .TooManyAccountLocks => 23,
+        .AddressLookupTableNotFound => 24,
+        .InvalidAddressLookupTableOwner => 25,
+        .InvalidAddressLookupTableData => 26,
+        .InvalidAddressLookupTableIndex => 27,
+        .InvalidRentPayingAccount => 28,
+        .WouldExceedMaxVoteCostLimit => 29,
+        .WouldExceedAccountDataTotalLimit => 30,
+        .DuplicateInstruction => |_| 31,
+        .InsufficientFundsForRent => |_| 32,
+        .MaxLoadedAccountsDataSizeExceeded => 33,
+        .InvalidLoadedAccountsDataSizeLimit => 34,
+        .ResanitizationNeeded => 35,
+        .ProgramExecutionTemporarilyRestricted => |_| 36,
+        .UnbalancedTransaction => 37,
+        .ProgramCacheHitMaxLimit => 38,
     };
 }
