@@ -1,34 +1,6 @@
 const pb = @import("proto/org/solana/sealevel/v1.pb.zig");
-const setup = @import("txn_setup.zig");
 const sig = @import("sig");
 const std = @import("std");
-
-const sysvar = sig.runtime.sysvar;
-const features = sig.runtime.features;
-
-const Hash = sig.core.Hash;
-const Signature = sig.core.Signature;
-const Transaction = sig.core.Transaction;
-const AccountSharedData = sig.runtime.AccountSharedData;
-
-const Ancestors = sig.core.status_cache.Ancestors;
-const Pubkey = sig.core.Pubkey;
-const InstructionError = sig.core.instruction.InstructionError;
-const TransactionContext = sig.runtime.transaction_context.TransactionContext;
-const TransactionVersion = sig.core.transaction.Version;
-const TransactionMessage = sig.core.transaction.Message;
-const TransactionInstruction = sig.core.transaction.Instruction;
-const TransactionAddressLookup = sig.core.transaction.AddressLookup;
-const FeeRateGovernor = sig.core.FeeRateGovernor;
-const GenesisConfig = sig.core.GenesisConfig;
-const Inflation = sig.core.Inflation;
-const PohConfig = sig.core.PohConfig;
-const SysvarCache = sig.runtime.SysvarCache;
-const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
-const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
-const TransactionExecutionConfig = sig.runtime.transaction_execution.TransactionExecutionConfig;
-const BatchAccountCache = sig.runtime.account_loader.BatchAccountCache;
-const loadAndExecuteTransaction = sig.runtime.transaction_execution.loadAndExecuteTransaction;
 
 const EMIT_LOGS = false;
 
@@ -78,277 +50,347 @@ export fn sol_compat_txn_execute_v1(
     return 1;
 }
 
-const FEE_COLLECTOR_PUBKEY = Pubkey.parseBase58String("1111111111111111111111111111111111") catch unreachable;
-const DEFAULT_SLOT: u64 = 10;
+const bincode = sig.bincode;
+const features = sig.runtime.features;
+const program = sig.runtime.program;
+const sysvar = sig.runtime.sysvar;
+
+const AccountsDb = sig.accounts_db.AccountsDB;
+
+const Ancestors = sig.core.Ancestors;
+const BlockhashQueue = sig.core.BlockhashQueue;
+const EpochStakes = sig.core.EpochStakes;
+const Hash = sig.core.Hash;
+const Pubkey = sig.core.Pubkey;
+const RentCollector = sig.core.RentCollector;
+const Signature = sig.core.Signature;
+const StatusCache = sig.core.StatusCache;
+const Transaction = sig.core.Transaction;
+const TransactionVersion = sig.core.transaction.Version;
+const TransactionMessage = sig.core.transaction.Message;
+const TransactionInstruction = sig.core.transaction.Instruction;
+const TransactionAddressLookup = sig.core.transaction.AddressLookup;
+
+const Rent = sig.runtime.sysvar.Rent;
+const EpochSchedule = sig.runtime.sysvar.EpochSchedule;
+const SlotHashes = sig.runtime.sysvar.SlotHashes;
+const StakeHistory = sig.runtime.sysvar.StakeHistory;
+const LastRestartSlot = sig.runtime.sysvar.LastRestartSlot;
+const Clock = sig.runtime.sysvar.Clock;
+
+const AccountSharedData = sig.runtime.AccountSharedData;
+const FeatureSet = sig.runtime.features.FeatureSet;
+const SysvarCache = sig.runtime.SysvarCache;
 
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
-    // TxnContext (Flattened)
-    // slot: u64
-    // features: ?Features
-    // blockhash_queue: ArrayList(ManagedString)
-    // account_shared_data: ArrayList(AccountSharedData)
-    // sanitized_transaction: SanitizedTransaction
+    // Load info from the protobuf transaction context
+    const slot = loadSlot(&pb_txn_ctx);
+    const feature_set = try loadFeatureSet(allocator, &pb_txn_ctx);
+    const blockhashes = try loadBlockhashes(allocator, &pb_txn_ctx);
+    const transaction = try loadTransaction(allocator, &pb_txn_ctx);
 
-    errdefer |err| {
-        std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
-        if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
-    }
-    var prng = std.Random.DefaultPrng.init(try generateSeed(pb_txn_ctx));
-
-    var feature_set = try setup.loadFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
-    defer feature_set.deinit(allocator);
-
-    try setup.toggleDirectMapping(allocator, &feature_set);
-
-    const genesis_config = try setup.initGenesisConfig(
-        allocator,
-        pb_txn_ctx.account_shared_data.items,
-    );
-    defer genesis_config.deinit(allocator);
-
-    const blockhashes = try setup.loadBlockhashes(
-        allocator,
-        pb_txn_ctx.blockhash_queue.items,
-    );
-    defer allocator.free(blockhashes);
-
-    var loaded_accounts = std.AutoArrayHashMap(Pubkey, struct { u64, AccountSharedData }){};
+    // Load accounts from the protobuf transaction context
+    // Sysvar defaults may be added to this account map before adding all accounts to accounts db for
+    // the specified slot.
+    var accounts = try loadAccounts(allocator, &pb_txn_ctx);
     defer {
-        for (loaded_accounts.values()) |v| v[1].data.deinit(allocator);
-        loaded_accounts.deinit(allocator);
+        for (accounts.values()) |acc| allocator.free(acc.data);
+        accounts.deinit(allocator);
     }
-    try setup.loadBuiltins(allocator, &loaded_accounts);
-    try setup.loadPrecompiles(allocator, &loaded_accounts);
 
-    // // genesis needs stakes for all epochs up to the epoch implied by
-    // //  slot = 0 and genesis configuration
-    // {
-    //     let stakes = bank.stakes_cache.stakes().clone();
-    //     let stakes = Arc::new(StakesEnum::from(stakes));
-    //     for epoch in 0..=bank.get_leader_schedule_epoch(bank.slot) {
-    //         bank.epoch_stakes
-    //             .insert(epoch, EpochStakes::new(stakes.clone(), epoch));
-    //     }
-    //     bank.update_stake_history(None);
-    // }
-    // bank.update_clock(None);
-    // bank.update_rent();
-    // bank.update_epoch_schedule();
-    // bank.update_recent_blockhashes();
-    // bank.update_last_restart_slot();
+    // Builtin accounts must also be loaded into accounts db, these accounts will be loaded at
+    // genesis i.e. slot 0.
+    // TODO: We will need to add feature gating here for new builtin programs and core bpf migration.
+    const builtin_accounts = try loadBuiltins(allocator);
+    defer {
+        for (builtin_accounts.values()) |acc| allocator.free(acc.data);
+        var ba = builtin_accounts;
+        ba.deinit(allocator);
+    }
 
-    // var loaded_accounts = std.AutoArrayHashMap(Pubkey, struct { u64, AccountSharedData }){};
-    // defer {
-    //     for (loaded_accounts.values()) |v| v[1].data.deinit(allocator);
-    //     loaded_accounts.deinit(allocator);
-    // }
+    const epoch_schedule = loadSysvar(
+        allocator,
+        EpochSchedule,
+        &accounts,
+    ) orelse EpochSchedule.DEFAULT;
+
+    const rent: Rent = loadSysvar(
+        allocator,
+        Rent,
+        &accounts,
+    ) orelse Rent.DEFAULT;
+
+    // Provide default slot hashes of size 1 if not provided
+    _ = loadSysvar(
+        allocator,
+        SlotHashes,
+        &accounts,
+    ) orelse blk: {
+        const slot_hashes = SlotHashes{
+            .entries = try allocator.dupe(struct { u64, Hash }, &.{.{ slot, Hash.ZEROES }}),
+        };
+
+        const slot_hashes_data = try allocator.alloc(u8, SlotHashes.SIZE_OF);
+        errdefer allocator.free(slot_hashes_data);
+
+        try bincode.writeToSlice(slot_hashes_data, slot_hashes, .{});
+
+        accounts.put(allocator, SlotHashes.ID, .{
+            .lamports = @max(1, rent.minimumBalance(slot_hashes_data.len)),
+            .data = slot_hashes_data,
+            .owner = sysvar.OWNER_ID,
+            .executable = false,
+            .rent_epoch = 0,
+        });
+
+        break :blk slot_hashes;
+    };
+
+    // Provide default stake history if not provided
+    _ = loadSysvar(
+        allocator,
+        StakeHistory,
+        &accounts,
+    ) orelse blk: {
+        const stake_history = StakeHistory{
+            .entries = try allocator.dupe(
+                struct { u64, StakeHistory.Entry },
+                &.{.{ 0, .{ .effective = 0, .activating = 0, .deactivating = 0 } }},
+            ),
+        };
+
+        const stake_history_data = try allocator.alloc(u8, StakeHistory.SIZE_OF);
+        errdefer allocator.free(stake_history_data);
+
+        try bincode.writeToSlice(stake_history_data, stake_history, .{});
+
+        accounts.put(allocator, StakeHistory.ID, .{
+            .lamports = @max(1, rent.minimumBalance(stake_history_data.len)),
+            .data = stake_history_data,
+            .owner = sysvar.OWNER_ID,
+            .executable = false,
+            .rent_epoch = 0,
+        });
+
+        // TODO: stake_history_update
+
+        break :blk stake_history;
+    };
+
+    // Provide default last restart slot sysvar if not provided
+    _ = loadSysvar(
+        allocator,
+        LastRestartSlot,
+        &accounts,
+    ) orelse blk: {
+        const last_restart_slot = LastRestartSlot{
+            .last_restart_slot = 0,
+        };
+
+        const last_restart_slot_data = try allocator.alloc(u8, LastRestartSlot.SIZE_OF);
+        errdefer allocator.free(last_restart_slot_data);
+
+        try bincode.writeToSlice(last_restart_slot_data, last_restart_slot, .{});
+
+        accounts.put(allocator, LastRestartSlot.ID, .{
+            .lamports = @max(1, rent.minimumBalance(last_restart_slot_data.len)),
+            .data = last_restart_slot_data,
+            .owner = sysvar.OWNER_ID,
+            .executable = false,
+            .rent_epoch = 0,
+        });
+
+        break :blk last_restart_slot;
+    };
+
+    // Provide a default clock if not present
+    _ = loadSysvar(
+        allocator,
+        Clock,
+        &accounts,
+    ) orelse blk: {
+        const clock = Clock{
+            .epoch = 0,
+            .epoch_start_timestamp = 0,
+            .unix_timestamp = 0,
+            .slot = slot,
+            .leader_schedule_epoch = 1,
+        };
+
+        const clock_data = try allocator.alloc(u8, Clock.SIZE_OF);
+        errdefer allocator.free(clock_data);
+
+        try bincode.writeToSlice(clock_data, clock, .{});
+
+        accounts.put(allocator, Clock.ID, .{
+            .lamports = @max(1, rent.minimumBalance(clock_data.len)),
+            .data = clock_data,
+            .owner = sysvar.OWNER_ID,
+            .executable = false,
+            .rent_epoch = 0,
+        });
+
+        // TODO: stake_history_update
+
+        break :blk clock;
+    };
+
+    // Epoch schedule and rent get set from the epoch bank
 
     var ancestors = Ancestors{};
     defer ancestors.deinit(allocator);
-    try ancestors.ancestors.put(allocator, 0, {});
 
-    const fee_rate_govenor = genesis_config.fee_rate_governor;
-    // for (genesis_config.accounts.iterator()) |item| {
-    //     // put accounts
-    //     _ = item;
-    // }
-    // for (genesis_config.rewards_pools.iterator()) |item| {
-    //     // put rewards pools
-    //     _ = item;
-    // }
+    var status_cache = StatusCache.default();
+    defer status_cache.deinit(allocator);
 
-    var blockhahs_queue = sig.core.bank.BlockhashQueue{};
-    defer blockhahs_queue.deinit(allocator);
-    try blockhahs_queue.insertGenesisHash(
-        allocator,
-        blockhashes[0],
-        fee_rate_govenor.lamports_per_signature,
-    );
+    var sysvar_cache = SysvarCache{};
+    defer sysvar_cache.deinit(allocator);
 
-    // READ SLOT
-    const slot = if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else DEFAULT_SLOT;
-    std.debug.print("Slot: {d}\n", .{slot});
+    const rent_collector = RentCollector{
+        .epoch = 0,
+        .epoch_schedule = .DEFAULT,
+        .slots_per_year = 0,
+        .rent = .{
+            .lamports_per_byte_year = 0,
+            .exemption_threshold = 0,
+            .burn_percent = 0,
+        },
+    };
 
-    if (slot > 0) {
-        try ancestors.ancestors.put(allocator, slot, {});
-        fee_rate_govenor = FeeRateGovernor.initDerived(&fee_rate_govenor, 0);
-    }
-    std.debug.print("Ancestors: {any}\n", .{ancestors.ancestors.keys()});
+    var blockhash_queue = BlockhashQueue.init(300);
+    defer blockhash_queue.deinit(allocator);
 
-    // Load accounts and sysvars
-    const sysvar_cache = SysvarCache{};
+    var epoch_stakes = EpochStakes.EMPTY;
+    defer epoch_stakes.deinit(allocator);
 
-    _ = sysvar_cache;
+    // _ = slot;
+    // _ = feature_set;
+    // _ = blockhashes;
+    // _ = accounts;
+    // _ = transaction;
+    _ = rent_collector;
     _ = emit_logs;
 
     return .{};
-
-    // const sanitized_transaction = try parseSanitizedTransaction(
-    //     allocator,
-    //     pb_txn_ctx.tx.?,
-    // );
-    // defer sanitized_transaction.deinit(allocator);
-
-    // const verify_transaction_result = try verifyTransaction(
-    //     allocator,
-    //     sanitized_transaction,
-    //     &feature_set,
-    //     &accounts_db,
-    // );
-
-    // const runtime_transaction: RuntimeTransaction = switch (verify_transaction_result) {
-    //     .ok => |txn| txn,
-    //     .err => |err| return err,
-    // };
-
-    // _ = runtime_transaction;
-    // _ = emit_logs;
-
-    // const environment = TransactionExecutionEnvironment{
-    //     .ancestors = &ancestors,
-    //     .feature_set = &feature_set,
-    //     .status_cache = undefined,
-    //     .sysvar_cache = undefined,
-    //     .rent_collector = undefined,
-    //     .blockhash_queue = undefined,
-    //     .epoch_stakes = undefined,
-
-    //     .max_age = 150, // MAX_PROCESSING_AGE
-    //     .last_blockhash = undefined,
-    //     .next_durable_nonce = undefined,
-    //     .next_lamports_per_signature = undefined,
-    //     .last_lamports_per_signature = undefined,
-    //     .lamports_per_signature = undefined,
-    // };
-
-    // const config = TransactionExecutionConfig{
-    //     .log = true,
-    //     .log_messages_byte_limit = null,
-    // };
-
-    // const result = try loadAndExecuteTransaction(
-    //     allocator,
-    //     &runtime_transaction,
-    //     &account_cache,
-    //     &environment,
-    //     &config,
-    // );
 }
 
-const VerifyTransactionResult = union(enum(u8)) {
-    ok: RuntimeTransaction,
-    err: pb.TxnResult,
-};
+fn loadHash(bytes: []const u8) !Hash {
+    if (bytes.len != Hash.SIZE) return error.OutOfBounds;
+    return .{ .data = bytes[0..Hash.SIZE].* };
+}
 
-const FeatureSet = sig.runtime.FeatureSet;
-const AccountsDb = sig.accounts_db.AccountsDB;
+fn loadPubkey(bytes: []const u8) !Pubkey {
+    if (bytes.len != Pubkey.SIZE) return error.OutOfBounds;
+    return .{ .data = bytes[0..Pubkey.SIZE].* };
+}
 
-fn verifyTransaction(
-    allocator: std.mem.Allocator,
-    transaction: Transaction,
-    feature_set: *const FeatureSet,
-    accounts_db: *AccountsDb,
-) !VerifyTransactionResult {
-    const serialized_msg = transaction.msg.serializeBounded(
-        transaction.version,
-    ) catch {
-        std.debug.print("SanitizedTransaction.msg.serializeBounded failed\n", .{});
-        return .{ .err = .{
-            .sanitization_error = true,
-            .status = transactionErrorToInt(.SanitizeFailure),
-        } };
+fn loadSlot(pb_txn_ctx: *const pb.TxnContext) u64 {
+    return if (pb_txn_ctx.slot_ctx) |ctx| ctx.slot else 10;
+}
+
+fn loadFeatureSet(allocator: std.mem.Allocator, pb_txn_ctx: *const pb.TxnContext) !FeatureSet {
+    var feature_set = blk: {
+        const maybe_pb_features = if (pb_txn_ctx.epoch_ctx) |epoch_ctx|
+            if (epoch_ctx.features) |pb_features| pb_features else null
+        else
+            null;
+
+        const pb_features = maybe_pb_features orelse break :blk FeatureSet.EMPTY;
+
+        var indexed_features = std.AutoArrayHashMap(u64, Pubkey).init(allocator);
+        defer indexed_features.deinit();
+
+        for (features.FEATURES) |feature| {
+            try indexed_features.put(@bitCast(feature.data[0..8].*), feature);
+        }
+
+        var feature_set = features.FeatureSet.EMPTY;
+
+        for (pb_features.features.items) |id| {
+            if (indexed_features.get(id)) |pubkey| {
+                try feature_set.active.put(allocator, pubkey, 0);
+            }
+        }
+
+        break :blk feature_set;
     };
-    const msg_hash = sig.core.transaction.Message.hash(serialized_msg.slice());
 
-    if (!feature_set.active.contains(features.MOVE_PRECOMPILE_VERIFICATION_TO_SVM)) {
-        const maybe_verify_error = try sig.runtime.program.precompiles.verifyPrecompiles(
-            allocator,
-            transaction,
-            feature_set,
-        );
-        if (maybe_verify_error) |verify_error| {
-            std.debug.print("Precompile verification failed\n", .{});
-            const instr_err, const instr_idx, const custom_err = switch (verify_error) {
-                .InstructionError => |err| blk: {
-                    const instr_err = sig.core.instruction.intFromInstructionErrorEnum(err[1]);
-                    const custom_err = switch (err[1]) {
-                        .Custom => |e| e,
-                        else => 0,
-                    };
-                    break :blk .{ instr_err, err[0], custom_err };
-                },
-                else => .{ 0, 0, 0 },
-            };
-            return .{ .err = .{
-                .sanitization_error = true,
-                .status = transactionErrorToInt(verify_error),
-                .instruction_error = instr_err,
-                .instruction_error_index = instr_idx,
-                .custom_error = custom_err,
-            } };
+    if (try std.process.hasEnvVar(allocator, "TOGGLE_DIRECT_MAPPING")) {
+        if (feature_set.active.contains(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING)) {
+            _ = feature_set.active.swapRemove(features.BPF_ACCOUNT_DATA_DIRECT_MAPPING);
+        } else {
+            try feature_set.active.put(allocator, features.BPF_ACCOUNT_DATA_DIRECT_MAPPING, 0);
         }
     }
 
-    const resolved_batch = sig.replay.resolve_lookup.resolveBatch(
-        allocator,
-        // NOTE: Need ancestors to load with fixed root
-        accounts_db,
-        &.{transaction},
-    ) catch |err| {
-        const err_code = switch (err) {
-            error.Overflow => 123456,
-            error.OutOfMemory => return error.OutOfMemory,
-            error.UnsupportedVersion => transactionErrorToInt(.UnsupportedVersion),
-            error.AddressLookupTableNotFound => transactionErrorToInt(.AddressLookupTableNotFound),
-            error.InvalidAddressLookupTableOwner => transactionErrorToInt(.InvalidAddressLookupTableOwner),
-            error.InvalidAddressLookupTableData => transactionErrorToInt(.InvalidAddressLookupTableData),
-            error.InvalidAddressLookupTableIndex => transactionErrorToInt(.InvalidAddressLookupTableIndex),
-        };
-        std.debug.print("resolve_lookup.resolveBatch failed\n", .{});
-        return .{ .err = .{
-            .sanitization_error = true,
-            .status = err_code,
-        } };
-    };
-    defer resolved_batch.deinit(allocator);
-
-    const resolved_txn = resolved_batch.transactions[0];
-
-    return .{ .ok = .{
-        .signature_count = resolved_txn.transaction.signatures.len,
-        .fee_payer = resolved_txn.transaction.msg.account_keys[0],
-        .msg_hash = msg_hash,
-        .recent_blockhash = resolved_txn.transaction.msg.recent_blockhash,
-        .instruction_infos = resolved_txn.instructions,
-        .accounts = resolved_txn.accounts,
-    } };
+    return feature_set;
 }
 
-fn generateSeed(pb_txn_ctx: pb.TxnContext) !u64 {
-    var hasher = std.crypto.hash.Blake3.init(.{});
-    const bytes: []const u8 = @as([*]const u8, @ptrCast(&pb_txn_ctx))[0..@sizeOf(pb.TxnContext)];
-    hasher.update(bytes);
-    var seed = Hash.ZEROES;
-    hasher.final(&seed.data);
-    return std.mem.bytesAsValue(u64, seed.data[0..8]).*;
-}
-
-fn parseSanitizedTransaction(
+fn loadBlockhashes(
     allocator: std.mem.Allocator,
-    pb_txn: pb.SanitizedTransaction,
+    pb_txn_ctx: *const pb.TxnContext,
+) ![]Hash {
+    const pb_blockhashes = pb_txn_ctx.blockhash_queue.items;
+    if (pb_blockhashes.len == 0)
+        return try allocator.dupe(Hash, &.{Hash.ZEROES});
+
+    const blockhashes = try allocator.alloc(Hash, pb_blockhashes.len);
+    errdefer allocator.free(blockhashes);
+
+    for (blockhashes, pb_blockhashes) |*blockhash, pb_blockhash|
+        blockhash.* = try loadHash(pb_blockhash.getSlice());
+
+    return blockhashes;
+}
+
+fn loadAccounts(
+    allocator: std.mem.Allocator,
+    pb_txn_ctx: *const pb.TxnContext,
+) !std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData) {
+    const pb_accounts = pb_txn_ctx.account_shared_data.items;
+
+    var accounts = std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData){};
+    errdefer {
+        for (accounts.values()) |acc| allocator.free(acc.data);
+        accounts.deinit(allocator);
+    }
+
+    for (pb_accounts) |pb_account| {
+        if (pb_account.lamports == 0) continue;
+        try accounts.put(allocator, try loadPubkey(pb_account.address.getSlice()), .{
+            .lamports = pb_account.lamports,
+            .data = try allocator.dupe(u8, pb_account.data.getSlice()),
+            .owner = try loadPubkey(pb_account.owner.getSlice()),
+            .executable = pb_account.executable,
+            .rent_epoch = pb_account.rent_epoch,
+        });
+    }
+
+    return accounts;
+}
+
+fn loadTransaction(
+    allocator: std.mem.Allocator,
+    pb_txn_ctx: *const pb.TxnContext,
 ) !Transaction {
+    const pb_txn = pb_txn_ctx.tx orelse return error.NoTransaction;
+
     const signatures = try allocator.alloc(
         Signature,
         @max(pb_txn.signatures.items.len, 1),
     );
+
     for (pb_txn.signatures.items, 0..) |pb_signature, i|
         signatures[i] = .{ .data = pb_signature.getSlice()[0..Signature.SIZE].* };
-    if (pb_txn.signatures.items.len == 0) signatures[0] = Signature.ZEROES;
 
-    const version, const message = try parseTransactionMesssage(
+    if (pb_txn.signatures.items.len == 0)
+        signatures[0] = Signature.ZEROES;
+
+    const version, const message = try loadTransactionMesssage(
         allocator,
         pb_txn.message.?,
     );
+
     return .{
         .signatures = signatures,
         .version = version,
@@ -356,7 +398,7 @@ fn parseSanitizedTransaction(
     };
 }
 
-fn parseTransactionMesssage(
+fn loadTransactionMesssage(
     allocator: std.mem.Allocator,
     message: pb.TransactionMessage,
 ) !struct { TransactionVersion, TransactionMessage } {
@@ -424,87 +466,154 @@ fn parseTransactionMesssage(
     };
 }
 
-fn verifyErrorToInt(err: sig.core.transaction.Transaction.VerifyError) u32 {
-    return switch (err) {
-        error.SignatureVerificationFailed => transactionErrorToInt(.SignatureFailure),
-        error.SerializationFailed => transactionErrorToInt(.SanitizeFailure),
-        else => std.debug.panic("Should not happen: {s}", .{@errorName(err)}),
-    };
+/// Loads builtin programs into the intial accounts map.
+/// The ALUT and Config Programs have been migrated to Core BPF and are hence not included here.
+/// The ZK Token Proof and ZK El Gamal Proof programs are not included as they have not been implemented yet.
+/// TODO: Add feature activations and core bpf handling
+pub fn loadBuiltins(
+    allocator: std.mem.Allocator,
+) !std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData) {
+    var accounts = std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData){};
+    errdefer {
+        for (accounts.values()) |acc| allocator.free(acc.data);
+        accounts.deinit(allocator);
+    }
+
+    // System Program
+    try accounts.put(allocator, program.system.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "system_program"),
+    });
+
+    // Vote Program
+    try accounts.put(allocator, program.vote.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "vote_program"),
+    });
+
+    // Stake Program
+    try accounts.put(allocator, program.stake.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "stake_program"),
+    });
+
+    // BPF Loader Program V1
+    try accounts.put(allocator, program.bpf_loader.v1.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "solana_bpf_loader_deprecated_program"),
+    });
+
+    // BPF Loader Program V2
+    try accounts.put(allocator, program.bpf_loader.v2.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "solana_bpf_loader_program"),
+    });
+
+    // BPF Loader Program V3
+    try accounts.put(allocator, program.bpf_loader.v3.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "solana_bpf_loader_upgradeable_program"),
+    });
+
+    // Compute Budget Program
+    try accounts.put(allocator, program.compute_budget.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, "compute_budget_program"),
+    });
+
+    // TODO: ZK Token Proof Program
+    // TODO: ZK El Gamal Proof Program
+
+    // Ed25519 Precompile
+    try accounts.put(allocator, program.precompiles.ed25519.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, ""),
+    });
+
+    // Secp256k1 Precompile
+    try accounts.put(allocator, program.precompiles.secp256k1.ID, .{
+        .lamports = 1,
+        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+        .executable = true,
+        .rent_epoch = 0,
+        .data = try allocator.dupe(u8, ""),
+    });
+
+    // TODO: Secp256r1 Precompile
+
+    return accounts;
 }
 
-fn transactionErrorToInt(err: sig.ledger.transaction_status.TransactionError) u32 {
-    return switch (err) {
-        .AccountInUse => 1,
-        .AccountLoadedTwice => 2,
-        .AccountNotFound => 3,
-        .ProgramAccountNotFound => 4,
-        .InsufficientFundsForFee => 5,
-        .InvalidAccountForFee => 6,
-        .AlreadyProcessed => 7,
-        .BlockhashNotFound => 8,
-        .InstructionError => |_| 9,
-        .CallChainTooDeep => 10,
-        .MissingSignatureForFee => 11,
-        .InvalidAccountIndex => 12,
-        .SignatureFailure => 13,
-        .InvalidProgramForExecution => 14,
-        .SanitizeFailure => 15,
-        .ClusterMaintenance => 16,
-        .AccountBorrowOutstanding => 17,
-        .WouldExceedMaxBlockCostLimit => 18,
-        .UnsupportedVersion => 19,
-        .InvalidWritableAccount => 20,
-        .WouldExceedMaxAccountCostLimit => 21,
-        .WouldExceedAccountDataBlockLimit => 22,
-        .TooManyAccountLocks => 23,
-        .AddressLookupTableNotFound => 24,
-        .InvalidAddressLookupTableOwner => 25,
-        .InvalidAddressLookupTableData => 26,
-        .InvalidAddressLookupTableIndex => 27,
-        .InvalidRentPayingAccount => 28,
-        .WouldExceedMaxVoteCostLimit => 29,
-        .WouldExceedAccountDataTotalLimit => 30,
-        .DuplicateInstruction => |_| 31,
-        .InsufficientFundsForRent => |_| 32,
-        .MaxLoadedAccountsDataSizeExceeded => 33,
-        .InvalidLoadedAccountsDataSizeLimit => 34,
-        .ResanitizationNeeded => 35,
-        .ProgramExecutionTemporarilyRestricted => |_| 36,
-        .UnbalancedTransaction => 37,
-        .ProgramCacheHitMaxLimit => 38,
-    };
+pub fn loadSysvar(
+    allocator: std.mem.Allocator,
+    comptime T: type,
+    accounts: *const std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData),
+) ?T {
+    const account = accounts.getPtr(T.ID) orelse return null;
+    return sig.bincode.readFromSlice(
+        allocator,
+        T,
+        account.data,
+        .{},
+    ) catch null;
 }
 
-// var initial_accounts = std.AutoArrayHashMap(Pubkey, AccountSharedData){};
-// defer {
-//     for (initial_accounts.values()) |v| allocator.free(v.data);
-//     initial_accounts.deinit(allocator);
-// }
+pub fn initAccountsDb(
+    allocator: std.mem.Allocator,
+    pb_txn_ctx: *const pb.TxnContext,
+) !AccountsDb {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(&pb_txn_ctx))[0..@sizeOf(pb.TxnContext)];
+    hasher.update(bytes);
+    var seed = Hash.ZEROES;
+    hasher.final(&seed.data);
+    var prng = std.Random.DefaultPrng.init(std.mem.bytesAsValue(u64, seed.data[0..8]).*);
 
-// for (genesis_config.accounts.keyIterator(), genesis_config.accounts.valueIterator()) |key, account| {
-//     try initial_accounts.put(key, account);
-// }
-// for (genesis_config.rewards_pools.keyIterator(), genesis_config.rewards_pools.valueIterator()) |key, account| {
-//     try initial_accounts.put(key, account);
-// }
+    const snapshot_dir_name = try std.fmt.allocPrint(
+        allocator,
+        "snapshot-dir-{}",
+        .{prng.random().int(u64)},
+    );
+    defer allocator.free(snapshot_dir_name);
+    try std.fs.cwd().makeDir(snapshot_dir_name);
+    defer std.fs.cwd().deleteTree(snapshot_dir_name) catch {};
+    const snapshot_dir = try std.fs.cwd().openDir(
+        snapshot_dir_name,
+        .{ .iterate = true },
+    );
 
-// const accounts = try allocator.alloc(sig.core.Account, pb_txn_ctx.account_shared_data.items.len);
-// defer allocator.free(accounts);
-// const keys = try allocator.alloc(Pubkey, pb_txn_ctx.account_shared_data.items.len);
-// defer allocator.free(keys);
-// for (pb_txn_ctx.account_shared_data.items, 0..) |account, i| {
-//     accounts[i] = .{
-//         .data = .initAllocated(account.data.getSlice()),
-//         .executable = account.executable,
-//         .owner = Pubkey{ .data = account.owner.getSlice()[0..Pubkey.SIZE].* },
-//         .lamports = account.lamports,
-//         .rent_epoch = account.rent_epoch,
-//     };
-//     keys[i] = Pubkey{ .data = account.address.getSlice()[0..Pubkey.SIZE].* };
-// }
-
-// try accounts_db.putAccountSlice(
-//     accounts,
-//     keys,
-//     slot,
-// );
+    return try sig.accounts_db.AccountsDB.init(.{
+        .allocator = allocator,
+        .logger = .noop,
+        .snapshot_dir = snapshot_dir,
+        .geyser_writer = null,
+        .gossip_view = null,
+        .index_allocation = .ram,
+        .number_of_index_shards = 1,
+        .buffer_pool_frames = 1024,
+    });
+}
