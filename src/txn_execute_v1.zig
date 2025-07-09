@@ -93,7 +93,7 @@ const SlotHashes = sig.runtime.sysvar.SlotHashes;
 const StakeHistory = sig.runtime.sysvar.StakeHistory;
 const SysvarCache = sig.runtime.SysvarCache;
 
-const loadTestAccountsDB = sig.accounts_db.db.loadTestAccountsDBSigFuzz;
+const loadTestAccountsDB = sig.accounts_db.db.loadTestAccountsDbEmpty;
 const fillMissingSysvarCacheEntries = sig.replay.update_sysvar.fillMissingEntries;
 const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
 
@@ -115,9 +115,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     var accounts_map = try loadAccountsMap(allocator, &pb_txn_ctx);
     defer deinitMapAndValues(allocator, accounts_map);
-
-    var builtin_accounts_map = std.AutoArrayHashMapUnmanaged(Pubkey, AccountSharedData){};
-    defer deinitMapAndValues(allocator, builtin_accounts_map);
 
     // TODO: use??
     // const fee_collector = Pubkey.parseBase58String("1111111111111111111111111111111111") catch unreachable;
@@ -146,6 +143,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer accounts_db.deinit();
 
+    var slot: Slot = undefined;
     var epoch: Epoch = undefined;
     var epoch_schedule: EpochSchedule = undefined;
 
@@ -171,6 +169,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     // Bank::new_with_paths(...)
     {
+        slot = 0;
         epoch = 0;
         try ancestors.addSlot(allocator, 0);
         // bank.compute_budget = runtime_config.compute_budget;
@@ -256,21 +255,29 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 // For fuzzing purposes, accounts db is currently empty so we do not need to check if
                 // the builtin program is migrated or not.
                 if (builtin_program.enable_feature_id != null) continue;
-                try builtin_accounts_map.put(allocator, builtin_program.program_id, .{
-                    .lamports = 1,
-                    .data = try allocator.dupe(u8, builtin_program.data),
-                    .executable = true,
-                    .owner = sig.runtime.ids.NATIVE_LOADER_ID,
-                    .rent_epoch = 0,
-                });
+                const data = try allocator.dupe(u8, builtin_program.data);
+                defer allocator.free(data);
+                try accounts_db.putAccount(
+                    slot,
+                    builtin_program.program_id,
+                    .{
+                        .lamports = 1,
+                        .data = data,
+                        .executable = true,
+                        .owner = sig.runtime.ids.NATIVE_LOADER_ID,
+                        .rent_epoch = 0,
+                    },
+                );
             }
 
             // Add precompiles
             for (program.precompiles.PRECOMPILES) |precompile| {
                 if (precompile.required_feature != null) continue;
-                try builtin_accounts_map.put(allocator, precompile.program_id, .{
+                // const data = try allocator.dupe(u8, &.{});
+                // defer allocator.free(data);
+                try accounts_db.putAccount(slot, precompile.program_id, .{
                     .lamports = 1,
-                    .data = try allocator.dupe(u8, &.{}),
+                    .data = &.{},
                     .executable = true,
                     .owner = sig.runtime.ids.NATIVE_LOADER_ID,
                     .rent_epoch = 0,
@@ -310,7 +317,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     // bank.rehash();
     //     Hashes the bank state, should be irrelevant for txn fuzzing
 
-    const slot = loadSlot(&pb_txn_ctx);
+    slot = loadSlot(&pb_txn_ctx);
     if (slot > 0) {
         // Bank::new_from_parent(...)
         {
@@ -420,64 +427,15 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         {}
     }
 
-    // NOTE: At this point we can write all the builtin accounts to accountsdb at slot 0
-    {
-        var pubkeys = std.ArrayListUnmanaged(Pubkey){};
-        defer pubkeys.deinit(allocator);
-        var accounts = std.ArrayListUnmanaged(Account){};
-        defer {
-            for (accounts.items) |acc| acc.deinit(allocator);
-            accounts.deinit(allocator);
-        }
-
-        for (builtin_accounts_map.keys(), builtin_accounts_map.values()) |pubkey, account| {
-            try pubkeys.append(allocator, pubkey);
-            try accounts.append(allocator, .{
-                .lamports = account.lamports,
-                .data = .initAllocatedOwned(try allocator.dupe(u8, account.data)),
-                .owner = account.owner,
-                .executable = account.executable,
-                .rent_epoch = account.rent_epoch,
-            });
-        }
-
-        std.debug.print("Putting {} accounts into accounts db at slot {}\n", .{
-            accounts.items.len,
-            0,
-        });
-        try accounts_db.putAccountSlice(
-            accounts.items,
-            pubkeys.items,
-            0,
-        );
-    }
-
     // Load accounts into accounts db
-    {
-        var pubkeys = std.ArrayListUnmanaged(Pubkey){};
-        defer pubkeys.deinit(allocator);
-        var accounts = std.ArrayListUnmanaged(Account){};
-        defer {
-            for (accounts.items) |acc| acc.deinit(allocator);
-            accounts.deinit(allocator);
-        }
-
-        for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
-            try pubkeys.append(allocator, pubkey);
-            try accounts.append(allocator, .{
-                .lamports = account.lamports,
-                .data = .initAllocatedOwned(try allocator.dupe(u8, account.data)),
-                .owner = account.owner,
-                .executable = account.executable,
-                .rent_epoch = account.rent_epoch,
-            });
-        }
-
-        std.debug.print("Putting {} accounts into accounts db at slot {}\n", .{
-            accounts.items.len,
-            slot,
+    for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
+        try accounts_db.putAccount(slot, pubkey, .{
+            .lamports = account.lamports,
+            .data = account.data,
+            .owner = account.owner,
+            .executable = account.executable,
+            .rent_epoch = account.rent_epoch,
         });
-        try accounts_db.putAccountSlice(accounts.items, pubkeys.items, slot);
     }
 
     // Reset and fill sysvar cache
