@@ -178,10 +178,10 @@ const program = sig.runtime.program;
 /// The ZK Token Proof and ZK El Gamal Proof programs are not included as they have not been implemented yet.
 pub fn loadBuiltins(
     allocator: std.mem.Allocator,
-    accounts: std.AutoArrayHashMapUnmanaged(Pubkey, struct { u64, AccountSharedData }),
+    accounts: *std.AutoArrayHashMapUnmanaged(Pubkey, struct { u64, AccountSharedData }),
 ) !void {
     // System Program
-    try accounts.put(program.system.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, program.system.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -190,7 +190,7 @@ pub fn loadBuiltins(
     } });
 
     // Vote Program
-    try accounts.put(program.vote.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, program.vote.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -199,7 +199,7 @@ pub fn loadBuiltins(
     } });
 
     // Stake Program
-    try accounts.put(program.stake.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, program.stake.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -208,7 +208,7 @@ pub fn loadBuiltins(
     } });
 
     // BPF Loader Program V1
-    try accounts.put(bpf_loader.v1.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, bpf_loader.v1.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -217,7 +217,7 @@ pub fn loadBuiltins(
     } });
 
     // BPF Loader Program V2
-    try accounts.put(bpf_loader.v2.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, bpf_loader.v2.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -226,7 +226,7 @@ pub fn loadBuiltins(
     } });
 
     // BPF Loader Program V3
-    try accounts.put(bpf_loader.v3.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, bpf_loader.v3.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -235,7 +235,7 @@ pub fn loadBuiltins(
     } });
 
     // Compute Budget Program
-    try accounts.put(program.compute_budget.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, program.compute_budget.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -249,10 +249,10 @@ pub fn loadBuiltins(
 
 pub fn loadPrecompiles(
     allocator: std.mem.Allocator,
-    accounts: std.AutoArrayHashMapUnmanaged(Pubkey, struct { u64, AccountSharedData }),
+    accounts: *std.AutoArrayHashMapUnmanaged(Pubkey, struct { u64, AccountSharedData }),
 ) !void {
     // Ed25519 Precompile
-    try accounts.put(program.precompiles.ed25519.ID, allocator, .{ 0, .{
+    try accounts.put(allocator, program.precompiles.ed25519.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,
@@ -261,7 +261,7 @@ pub fn loadPrecompiles(
     } });
 
     // Keccak256 Precompile
-    try accounts.put(program.precompiles.secp256k1, allocator, .{ 0, .{
+    try accounts.put(allocator, program.precompiles.secp256k1.ID, .{ 0, .{
         .lamports = 1,
         .owner = sig.runtime.ids.NATIVE_LOADER_ID,
         .executable = true,

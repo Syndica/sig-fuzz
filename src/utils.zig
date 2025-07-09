@@ -17,7 +17,7 @@ const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
 const FeatureSet = sig.runtime.FeatureSet;
 const SysvarCache = sig.runtime.SysvarCache;
-const EpochStakes = sig.core.stake.EpochStakes;
+const EpochStakes = sig.core.EpochStakes;
 const ProgramMap = sig.runtime.program_loader.ProgramMap;
 
 const Pubkey = sig.core.Pubkey;
@@ -100,10 +100,10 @@ pub fn createTransactionContext(
     errdefer comptime unreachable;
 
     if (sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
-        if (recent_blockhashes.entries.len > 0) {
-            const prev_entry = recent_blockhashes.entries[recent_blockhashes.entries.len - 1];
+        if (recent_blockhashes.entries.items.len > 0) {
+            const prev_entry = recent_blockhashes.entries.items[recent_blockhashes.entries.items.len - 1];
             tc.prev_blockhash = prev_entry.blockhash;
-            tc.prev_lamports_per_signature = prev_entry.fee_calculator.lamports_per_signature;
+            tc.prev_lamports_per_signature = prev_entry.lamports_per_signature;
         }
     }
 }

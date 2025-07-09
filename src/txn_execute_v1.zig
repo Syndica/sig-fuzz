@@ -11,7 +11,7 @@ const Signature = sig.core.Signature;
 const Transaction = sig.core.Transaction;
 const AccountSharedData = sig.runtime.AccountSharedData;
 
-const Ancestors = sig.core.status_cache.Ancestors;
+const Ancestors = sig.core.Ancestors;
 const Pubkey = sig.core.Pubkey;
 const InstructionError = sig.core.instruction.InstructionError;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
@@ -88,12 +88,13 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     // blockhash_queue: ArrayList(ManagedString)
     // account_shared_data: ArrayList(AccountSharedData)
     // sanitized_transaction: SanitizedTransaction
-
     errdefer |err| {
         std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
         if (@errorReturnTrace()) |tr| std.debug.dumpStackTrace(tr.*);
     }
     var prng = std.Random.DefaultPrng.init(try generateSeed(pb_txn_ctx));
+    const random = prng.random();
+    _ = random;
 
     var feature_set = try setup.loadFeatureSet(allocator, pb_txn_ctx.epoch_ctx);
     defer feature_set.deinit(allocator);
@@ -112,9 +113,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer allocator.free(blockhashes);
 
-    var loaded_accounts = std.AutoArrayHashMap(Pubkey, struct { u64, AccountSharedData }){};
+    var loaded_accounts = std.AutoArrayHashMapUnmanaged(Pubkey, struct { u64, AccountSharedData }){};
     defer {
-        for (loaded_accounts.values()) |v| v[1].data.deinit(allocator);
+        for (loaded_accounts.values()) |v| v[1].deinit(allocator);
         loaded_accounts.deinit(allocator);
     }
     try setup.loadBuiltins(allocator, &loaded_accounts);
@@ -147,7 +148,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     defer ancestors.deinit(allocator);
     try ancestors.ancestors.put(allocator, 0, {});
 
-    const fee_rate_govenor = genesis_config.fee_rate_governor;
+    var fee_rate_govenor = genesis_config.fee_rate_governor;
     // for (genesis_config.accounts.iterator()) |item| {
     //     // put accounts
     //     _ = item;
@@ -157,7 +158,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     //     _ = item;
     // }
 
-    var blockhahs_queue = sig.core.bank.BlockhashQueue{};
+    var blockhahs_queue = sig.core.BlockhashQueue.DEFAULT;
     defer blockhahs_queue.deinit(allocator);
     try blockhahs_queue.insertGenesisHash(
         allocator,

@@ -10,7 +10,7 @@ const program_loader = sig.runtime.program_loader;
 
 const Hash = sig.core.Hash;
 const Pubkey = sig.core.Pubkey;
-const EpochStakes = sig.core.stake.EpochStakes;
+const EpochStakes = sig.core.EpochStakes;
 const AccountSharedData = sig.runtime.AccountSharedData;
 const ComputeBudget = sig.runtime.ComputeBudget;
 const SysvarCache = sig.runtime.SysvarCache;
