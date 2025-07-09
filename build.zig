@@ -17,6 +17,33 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    {
+        const run_tests = b.step("test", "Run unit tests");
+
+        const filters = b.option(
+            []const []const u8,
+            "filter",
+            "List of filters, used for example to filter unit tests by name. " ++
+                "Specified as a series like `-Dfilter='filter1' -Dfilter='filter2'`.",
+        ) orelse &.{};
+
+        const unit_tests_exe = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/lib.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "sig", .module = sig.module("sig") },
+                    .{ .name = "protobuf", .module = pb.module("protobuf") },
+                },
+            }),
+            .filters = filters,
+        });
+
+        const run = b.addRunArtifact(unit_tests_exe);
+        run_tests.dependOn(&run.step);
+    }
+
     var protoc_step = protobuf.RunProtocStep.create(b, pb.builder, target, .{
         .destination_directory = b.path("src/proto"),
         .source_files = &.{
