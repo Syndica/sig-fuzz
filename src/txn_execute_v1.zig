@@ -52,6 +52,8 @@ export fn sol_compat_txn_execute_v1(
 
 const builtins = @import("builtins.zig");
 
+const Atomic = std.atomic.Value;
+
 const bincode = sig.bincode;
 const features = sig.runtime.features;
 const program = sig.runtime.program;
@@ -70,11 +72,13 @@ const EpochStakesMap = sig.core.EpochStakesMap;
 const FeeRateGovernor = sig.core.FeeRateGovernor;
 const GenesisConfig = sig.core.GenesisConfig;
 const Hash = sig.core.Hash;
+const HardForks = sig.core.HardForks;
 const Pubkey = sig.core.Pubkey;
 const RentCollector = sig.core.rent_collector.RentCollector;
 const Slot = sig.core.Slot;
 const Signature = sig.core.Signature;
 const StatusCache = sig.core.StatusCache;
+const StakesCache = sig.core.StakesCache;
 const Transaction = sig.core.Transaction;
 const TransactionVersion = sig.core.transaction.Version;
 const TransactionMessage = sig.core.transaction.Message;
@@ -143,8 +147,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer accounts_db.deinit();
 
-    var slot: Slot = undefined;
-    var epoch: Epoch = undefined;
+    var slot: Slot = 0;
+    var epoch: Epoch = 0;
+    var parent_slot: Slot = 0;
+    var parent_hash: Hash = Hash.ZEROES;
     var epoch_schedule: EpochSchedule = undefined;
 
     var ancestors = Ancestors{};
@@ -158,8 +164,14 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     var blockhash_queue = BlockhashQueue.DEFAULT;
     defer blockhash_queue.deinit(allocator);
 
-    var epoch_stakes = EpochStakesMap{};
-    defer epoch_stakes.deinit(allocator);
+    var epoch_stakes_map = EpochStakesMap{};
+    defer epoch_stakes_map.deinit(allocator);
+
+    var hard_forks = HardForks{};
+    defer hard_forks.deinit(allocator);
+
+    var stakes_cache = StakesCache.default();
+    defer stakes_cache.deinit(allocator);
 
     var sysvar_cache = SysvarCache{};
     defer sysvar_cache.deinit(allocator);
@@ -167,10 +179,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     var vm_environment = vm.Environment{};
     defer vm_environment.deinit(allocator);
 
+    var capitalization = Atomic(u64).init(0);
+
     // Bank::new_with_paths(...)
     {
-        slot = 0;
-        epoch = 0;
         try ancestors.addSlot(allocator, 0);
         // bank.compute_budget = runtime_config.compute_budget;
         // bank.transaction_account_lock_limit = null;
@@ -295,17 +307,43 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
         // Add epoch stakes for all epochs up to the banks slot using banks stakes cache
         // The bank slot is 0 and stakes cache is empty, so we add default epoch stakes.
-        for (0..epoch_schedule.getLeaderScheduleEpoch(0)) |e| {
-            try epoch_stakes.put(allocator, e, EpochStakes.DEFAULT);
+        for (0..epoch_schedule.getLeaderScheduleEpoch(epoch)) |e| {
+            try epoch_stakes_map.put(allocator, e, EpochStakes.DEFAULT);
         }
 
-        // TODO: updateStakeHistory(None)
-        // TODO: updateClock(None)
-        // TODO: updateRent();
-        // TODO: updateEpochSchedule();
-        // TODO: updateRecentBlockhashes();
-        // TODO: updateLastRestartSlot();
-        // TODO: fillMissingSysvarCacheEntries();
+        const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
+            .accounts_db = &accounts_db,
+            .capitalization = &capitalization,
+            .ancestors = &ancestors,
+            .rent = &genesis_config.rent,
+            .slot = slot,
+        };
+
+        try update_sysvar.updateStakeHistory(
+            allocator,
+            .{
+                .epoch = epoch,
+                .parent_epoch = null, // no parent yet
+                .stakes_cache = &stakes_cache,
+                .update_sysvar_deps = update_sysvar_deps,
+            },
+        );
+        try update_sysvar.updateClock(allocator, .{
+            .feature_set = &feature_set,
+            .epoch_schedule = &epoch_schedule,
+            .epoch_stakes_map = &epoch_stakes_map,
+            .stakes_cache = &stakes_cache,
+            .epoch = epoch,
+            .parent_epoch = null, // no parent yet
+            .genesis_creation_time = genesis_config.creation_time,
+            .ns_per_slot = @intCast(genesis_config.nsPerSlot()),
+            .update_sysvar_deps = update_sysvar_deps,
+        });
+        try update_sysvar.updateRent(allocator, genesis_config.rent, update_sysvar_deps);
+        try update_sysvar.updateEpochSchedule(allocator, epoch_schedule, update_sysvar_deps);
+        try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
+        try update_sysvar.updateLastRestartSlot(allocator, &feature_set, &hard_forks, update_sysvar_deps);
+        try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
     }
 
     // NOTE: The following logic should not impact txn fuzzing
@@ -316,6 +354,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     //     Just gets the root bank
     // bank.rehash();
     //     Hashes the bank state, should be irrelevant for txn fuzzing
+
+    parent_slot = slot;
+    parent_hash = Hash.ZEROES; // TODO: hopefully we don't need to compute the bank hash
+    const parent_epoch = epoch;
 
     slot = loadSlot(&pb_txn_ctx);
     if (slot > 0) {
@@ -399,14 +441,45 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
             // Update sysvars
             {
-                // TODO: updateSlotHashes();
-                // TODO: updateStakeHistory(parent.epoch);
-                // TODO: updateClock(parent.epoch);
-                // TODO: updateLastRestartSlot();
+                const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
+                    .accounts_db = &accounts_db,
+                    .capitalization = &capitalization,
+                    .ancestors = &ancestors,
+                    .rent = &genesis_config.rent,
+                    .slot = slot,
+                };
+
+                try update_sysvar.updateSlotHashes(
+                    allocator,
+                    parent_slot,
+                    parent_hash,
+                    update_sysvar_deps,
+                );
+                try update_sysvar.updateStakeHistory(
+                    allocator,
+                    .{
+                        .epoch = epoch,
+                        .parent_epoch = parent_epoch,
+                        .stakes_cache = &stakes_cache,
+                        .update_sysvar_deps = update_sysvar_deps,
+                    },
+                );
+                try update_sysvar.updateClock(allocator, .{
+                    .feature_set = &feature_set,
+                    .epoch_schedule = &epoch_schedule,
+                    .epoch_stakes_map = &epoch_stakes_map,
+                    .stakes_cache = &stakes_cache,
+                    .epoch = epoch,
+                    .parent_epoch = parent_epoch,
+                    .genesis_creation_time = genesis_config.creation_time,
+                    .ns_per_slot = @intCast(genesis_config.nsPerSlot()),
+                    .update_sysvar_deps = update_sysvar_deps,
+                });
+                try update_sysvar.updateLastRestartSlot(allocator, &feature_set, &hard_forks, update_sysvar_deps);
             }
 
             // Fill missing sysvar cache entries
-            try fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
+            try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
 
             // Get num accounts modified by this slot if accounts lt hash enabled
             {}
@@ -440,11 +513,21 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     // Reset and fill sysvar cache
     sysvar_cache.reset(allocator);
-    try fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
+    try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
 
     // Update epoch schedule and rent to minimum rent exempt balance
-    // TODO: updateEpochSchedule();
-    // TODO: updateRent();
+    {
+        const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
+            .accounts_db = &accounts_db,
+            .capitalization = &capitalization,
+            .ancestors = &ancestors,
+            .rent = &genesis_config.rent,
+            .slot = slot,
+        };
+
+        try update_sysvar.updateRent(allocator, genesis_config.rent, update_sysvar_deps);
+        try update_sysvar.updateEpochSchedule(allocator, epoch_schedule, update_sysvar_deps);
+    }
 
     // Get lamports per signature from first entry in recent blockhashes
     const lamports_per_signature = blk: {
@@ -466,11 +549,20 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     }
 
     // Update recent blockhashes
-    // TODO: updateRecentBlockhashes();
+    {
+        const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
+            .accounts_db = &accounts_db,
+            .capitalization = &capitalization,
+            .ancestors = &ancestors,
+            .rent = &genesis_config.rent,
+            .slot = slot,
+        };
+        try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
+    }
 
     // Reset and fill sysvar cache
     sysvar_cache.reset(allocator);
-    try fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
+    try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
 
     _ = emit_logs;
 
