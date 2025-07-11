@@ -104,12 +104,6 @@ pub const BUILTINS = [_]BuiltinProgram{
         },
     },
     .{
-        .program_id = program.bpf_loader.v4.ID,
-        .data = "loader_v4",
-        .enable_feature_id = features.ENABLE_LOADER_V4,
-        .core_bpf_migration_config = null,
-    },
-    .{
         .program_id = program.address_lookup_table.ID,
         .data = "address_lookup_table_program",
         .enable_feature_id = null,
@@ -139,23 +133,29 @@ pub const BUILTINS = [_]BuiltinProgram{
         .core_bpf_migration_config = null,
     },
     .{
+        .program_id = program.bpf_loader.v4.ID,
+        .data = "loader_v4",
+        .enable_feature_id = features.ENABLE_LOADER_V4,
+        .core_bpf_migration_config = null,
+    },
+    .{
         .program_id = program.compute_budget.ID,
         .data = "compute_budget_program",
         .enable_feature_id = null,
         .core_bpf_migration_config = null,
     },
-    // .{
-    //     .program_id = program.zk_token_proof.ID,
-    //     .data = "zk_token_proof_program",
-    //     .enable_feature_id = features.ZK_TOKEN_SDK_ENABLED,
-    //     .core_bpf_migration_config = null,
-    // },
-    // .{
-    //     .program_id = program.zk_elgamal_proof.ID,
-    //     .data = "zk_elgamal_proof_program",
-    //     .enable_feature_id = features.ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
-    //     .core_bpf_migration_config = null,
-    // },
+    .{
+        .program_id = sig.runtime.ids.ZK_TOKEN_PROOF_PROGRAM_ID,
+        .data = "zk_token_proof_program",
+        .enable_feature_id = features.ZK_TOKEN_SDK_ENABLED,
+        .core_bpf_migration_config = null,
+    },
+    .{
+        .program_id = sig.runtime.ids.ZK_ELGAMAL_PROOF_PROGRAM_ID,
+        .data = "zk_elgamal_proof_program",
+        .enable_feature_id = features.ZK_ELGAMAL_PROOF_PROGRAM_ENABLED,
+        .core_bpf_migration_config = null,
+    },
 };
 
 pub const STATELESS_BUILTINS = [_]StatelessBuiltinPrototype{

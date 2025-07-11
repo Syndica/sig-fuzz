@@ -52,6 +52,7 @@ export fn sol_compat_txn_execute_v1(
 
 const builtins = @import("builtins.zig");
 
+const Allocator = std.mem.Allocator;
 const Atomic = std.atomic.Value;
 
 const bincode = sig.bincode;
@@ -98,7 +99,7 @@ const StakeHistory = sig.runtime.sysvar.StakeHistory;
 const SysvarCache = sig.runtime.SysvarCache;
 
 const loadTestAccountsDB = sig.accounts_db.db.loadTestAccountsDbEmpty;
-const fillMissingSysvarCacheEntries = sig.replay.update_sysvar.fillMissingEntries;
+const fillMissingSysvarCacheEntries = sig.replay.update_sysvar.fillMissingSysvarCacheEntries;
 const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
 
 fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, emit_logs: bool) !pb.TxnResult {
@@ -136,7 +137,25 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         Rent,
         &accounts_map,
     ) orelse Rent.DEFAULT;
+    try genesis_config.accounts.put(program.address_lookup_table.ID, .{
+        .lamports = 1,
+        .data = .initEmpty(0),
+        .owner = program.bpf_loader.v3.ID,
+        .executable = false,
+        .rent_epoch = 0,
+    });
+    try genesis_config.accounts.put(
+        program.config.ID,
+        .{
+            .lamports = 1,
+            .data = .initEmpty(0),
+            .owner = program.bpf_loader.v3.ID,
+            .executable = false,
+            .rent_epoch = 0,
+        },
+    );
 
+    // Bank::new_with_paths(...)
     var tmp_dir_root = std.testing.tmpDir(.{});
     defer tmp_dir_root.cleanup();
     var accounts_db = try loadTestAccountsDB(
@@ -196,7 +215,16 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             fee_rate_govenor = genesis_config.fee_rate_governor;
 
             // Insert genesis config accounts
-            std.debug.assert(genesis_config.accounts.count() == 0);
+            var genesis_account_iterator = genesis_config.accounts.iterator();
+            while (genesis_account_iterator.next()) |kv| {
+                const account = try accountSharedDataFromAccount(allocator, kv.value_ptr);
+                defer account.deinit(allocator);
+                try accounts_db.putAccount(
+                    slot,
+                    kv.key_ptr.*,
+                    account,
+                );
+            }
 
             // Insert genesis config rewards pool accounts
             std.debug.assert(genesis_config.rewards_pools.count() == 0);
@@ -240,17 +268,19 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             std.debug.assert(genesis_config.rewards_pools.count() == 0);
 
             // TODO: apply feature activations
-            std.debug.print("WARNING: applyFeatureActivations not implemented\n", .{});
+            // std.debug.print("WARNING: applyFeatureActivations not implemented\n", .{});
 
             // Set limits for 50m block limits
-            if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_50M)) {
-                @panic("set limits not implemented");
-            }
+            // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_50M)) {
+            //     // TODO: This gets hit
+            //     @panic("set limits not implemented");
+            // }
 
             // Set limits for 60m block limits
-            if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_60M)) {
-                @panic("set limits not implemented");
-            }
+            // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_60M)) {
+            //     // TODO: This gets hit
+            //     @panic("set limits not implemented");
+            // }
 
             // NOTE: This should not impact txn fuzzing
             // If the accounts delta hash is still in use, start the background account hasher
@@ -266,9 +296,19 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 // have an entry in accounts db with owner bpf_loader.v3.ID (i.e. it is now a BPF program).
                 // For fuzzing purposes, accounts db is currently empty so we do not need to check if
                 // the builtin program is migrated or not.
-                if (builtin_program.enable_feature_id != null) continue;
+                const builtin_is_bpf_program = if (try accounts_db.getAccountWithAncestors(
+                    &builtin_program.program_id,
+                    &ancestors,
+                )) |account| blk: {
+                    defer account.deinit(allocator);
+                    break :blk account.owner.equals(&program.bpf_loader.v3.ID);
+                } else false;
+
+                if (builtin_program.enable_feature_id != null or builtin_is_bpf_program) continue;
+
                 const data = try allocator.dupe(u8, builtin_program.data);
                 defer allocator.free(data);
+
                 try accounts_db.putAccount(
                     slot,
                     builtin_program.program_id,
@@ -346,6 +386,22 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
     }
 
+    try writeState(allocator, .{
+        .slot = slot,
+        .epoch = epoch,
+        .hash = Hash.ZEROES,
+        .parent_slot = parent_slot,
+        .parent_hash = parent_hash,
+        .ancestors = ancestors,
+        .rent = genesis_config.rent,
+        .epoch_schedule = epoch_schedule,
+        .sysvar_cache = sysvar_cache,
+        .accounts_db = &accounts_db,
+        .possible_accounts = &POSSIBLE_ACCOUNTS_0,
+    });
+
+    if (true) return .{};
+
     // NOTE: The following logic should not impact txn fuzzing
     // let bank_forks = BankForks::new_rw_arc(bank);
     //     Sets the fork graph in the banks program cache to the newly created bank_forks.
@@ -358,6 +414,18 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     parent_slot = slot;
     parent_hash = Hash.ZEROES; // TODO: hopefully we don't need to compute the bank hash
     const parent_epoch = epoch;
+
+    // try printState(.{
+    //     .slot = slot,
+    //     .epoch = epoch,
+    //     .hash = parent_hash,
+    //     .parent_slot = parent_slot,
+    //     .parent_hash = parent_hash,
+    //     .ancestors = ancestors,
+    //     .sysvar_cache = sysvar_cache,
+    //     .accounts_db = &accounts_db,
+    //     .expected_accounts = &SAMPLE_0_EXPECTED_ACCOUNTS_0,
+    // });
 
     slot = loadSlot(&pb_txn_ctx);
     if (slot > 0) {
@@ -816,15 +884,143 @@ pub fn getSysvarFromAccounts(
 //     });
 // }
 
-test "execute sample txn context" {
-    const allocator = std.testing.allocator;
-    const pb_txn_ctx = try sampleTxnContext(allocator);
-    defer pb_txn_ctx.deinit();
+fn accountSharedDataFromAccount(
+    allocator: Allocator,
+    account: *const Account,
+) !AccountSharedData {
+    const data = try account.data.dupeAllocatedOwned(allocator);
+    defer data.deinit(allocator);
 
-    const result = executeTxnContext(allocator, pb_txn_ctx, false) catch |err| {
-        std.debug.print("executeTxnContext failed: {s}\n", .{@errorName(err)});
-        return;
+    return .{
+        .lamports = account.lamports,
+        .data = try allocator.dupe(u8, data.owned_allocation),
+        .owner = account.owner,
+        .executable = account.executable,
+        .rent_epoch = account.rent_epoch,
     };
+}
+
+fn accountFromAccountSharedData(
+    allocator: Allocator,
+    account: *const AccountSharedData,
+) !Account {
+    return .{
+        .lamports = account.lamports,
+        .data = .initAllocatedOwned(try allocator.dupe(u8, account.data)),
+        .owner = account.owner,
+        .executable = account.executable,
+        .rent_epoch = account.rent_epoch,
+    };
+}
+
+const State = struct {
+    slot: Slot,
+    epoch: Epoch,
+    hash: Hash,
+    parent_slot: Slot,
+    parent_hash: Hash,
+    ancestors: Ancestors,
+    rent: Rent,
+    epoch_schedule: EpochSchedule,
+    sysvar_cache: SysvarCache,
+    accounts_db: *AccountsDb,
+    possible_accounts: []const struct { Slot, Pubkey },
+};
+
+fn writeState(allocator: Allocator, state: State) !void {
+    var file = std.fs.cwd().openFile("output-state-sig.txt", .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try std.fs.cwd().createFile("output-state-sig.txt", .{}),
+        else => return err,
+    };
+    defer file.close();
+
+    try file.seekFromEnd(0);
+
+    const writer = file.writer();
+
+    try writer.print("Slot:  {}\n", .{state.slot});
+    try writer.print("Epoch: {}\n", .{state.epoch});
+    try writer.print("Hash:  {}\n", .{state.hash});
+    try writer.print("Parent Slot: {}\n", .{state.parent_slot});
+    try writer.print("Parent Hash: {any}\n", .{state.parent_hash});
+    try writeSlice(allocator, writer, "Ancestors: ", "\n", Slot, state.ancestors.ancestors.keys());
+    try writeAccounts(allocator, writer, state.accounts_db, state.possible_accounts);
+    try writer.print("\n", .{});
+}
+
+fn writeAccounts(
+    allocator: Allocator,
+    writer: anytype,
+    accounts_db: *AccountsDb,
+    expected_accounts: []const struct { Slot, Pubkey },
+) !void {
+    try writer.print("Accounts:\n", .{});
+    for (expected_accounts) |slot_pubkey| {
+        const slot, const pubkey = slot_pubkey;
+
+        var ancestors = Ancestors{};
+        defer ancestors.deinit(allocator);
+        try ancestors.addSlot(allocator, slot);
+
+        const maybe_account = try accounts_db.getAccountWithAncestors(&pubkey, &ancestors);
+        if (maybe_account) |account| {
+            defer account.deinit(allocator);
+            const data = try account.data.dupeAllocatedOwned(allocator);
+            defer data.deinit(allocator);
+
+            try writer.print("  slot={}, pubkey={}, lamports={}, owner={}, executable={}, rent_epoch={}", .{
+                slot,
+                pubkey,
+                account.lamports,
+                account.owner,
+                account.executable,
+                account.rent_epoch,
+            });
+
+            try writeSlice(allocator, writer, ", data=", "\n", u8, data.owned_allocation);
+        }
+    }
+}
+
+fn writeSlice(allocator: Allocator, writer: anytype, prefix: []const u8, suffix: []const u8, comptime T: type, slice: []const T) !void {
+    const str = try std.fmt.allocPrint(allocator, "{any}", .{slice[0..@min(slice.len, 512)]});
+    defer allocator.free(str);
+    str[1] = '[';
+    str[str.len - 2] = ']';
+    try writer.print("{s}{s}{s}", .{ prefix, str[1 .. str.len - 1], suffix });
+}
+
+const POSSIBLE_ACCOUNTS_0 = [_]struct { Slot, Pubkey }{
+    .{ 0, Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("BPFLoader1111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("BPFLoader2111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("BPFLoaderUpgradeab1e11111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("ComputeBudget111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("Config1111111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("Ed25519SigVerify111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("KeccakSecp256k11111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("LoaderV411111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("Secp256r1SigVerify1111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("Stake11111111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarC1ock11111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarEpochSchedu1e111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarLastRestartS1ot1111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarRent111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("SysvarStakeHistory1111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("Vote111111111111111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("ZkE1Gama1Proof11111111111111111111111111111") catch unreachable },
+    .{ 0, Pubkey.parseBase58String("ZkTokenProof1111111111111111111111111111111") catch unreachable },
+};
+
+test "sampleTxnContext" {
+    const allocator = std.testing.allocator;
+
+    const txn_ctx = try sampleTxnContext(allocator);
+    defer txn_ctx.deinit();
+
+    const result = try executeTxnContext(allocator, txn_ctx, false);
     defer result.deinit();
 }
 
@@ -838,98 +1034,98 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
 
     var pb_blockhashes = std.ArrayList(ManagedString).init(allocator);
     try pb_blockhashes.appendSlice(&.{
-        .static(&(Hash.parseBase58String("Brqgfg9qhuU6BN29JvA1U2yUwd89evLxkGrPhgQ9T7GK") catch unreachable).data),
-        .static(&(Hash.parseBase58String("81T56cg6QzEjVM86Rroy5FCxFf6pwuXnj7DYXNeHNYP") catch unreachable).data),
-        .static(&(Hash.parseBase58String("36nEg9eQu2k9ZbjjgUN4wbsc7n5mNj6TbzXkUznJJ22B") catch unreachable).data),
-        .static(&(Hash.parseBase58String("GdWCqpD7scfusjv2XR5zGc72eN4WV3uJU9qqocPdz1Qb") catch unreachable).data),
-        .static(&(Hash.parseBase58String("VA51KKvmkQNuTVMn6i9K7Q3aZPx3Zc1DzTQdbBLrLWj") catch unreachable).data),
-        .static(&(Hash.parseBase58String("5kYLD3hcUBL119NCHvzxPLpB9AQRLCcvRdnh8LKmg1Ry") catch unreachable).data),
-        .static(&(Hash.parseBase58String("EYVsXqunwUb3F86SoX4FF7iySFtAJSdLKG7FgMtf3jcT") catch unreachable).data),
-        .static(&(Hash.parseBase58String("Fv2sZfGeyMMTQJ4d4qTncp3WcC38P2AoRVBJsgVp8WCf") catch unreachable).data),
-        .static(&(Hash.parseBase58String("FPYkMwSAs6trDDL43XVm9M33KKkZ9TEvy8EarAcrPetX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("BfctqhCvJMMra4yU9bZhfk4WX6WgPHkrVxhqedrKQmJX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("ABZVpG53wJbQFy4KSdZRcaaQJXmRr7tXyo5LkDcYCEmm") catch unreachable).data),
-        .static(&(Hash.parseBase58String("BLWf8LmnMxRAv5w3RJ5mtGBmjcHbDBhGDqj5rVQgCZGK") catch unreachable).data),
-        .static(&(Hash.parseBase58String("Eh15BA5rcEpy1urEVy6dHn1tiZ9wfet8nkM6CMqmacWT") catch unreachable).data),
-        .static(&(Hash.parseBase58String("EBfwhNr2qbhH2o1DRi4irs4fjhLEfMBfzYPbT2CBkjjV") catch unreachable).data),
-        .static(&(Hash.parseBase58String("DuhSdTShpk6XvCW79xXpBHcH9cEmRyktA9HcW38ivQ3R") catch unreachable).data),
-        .static(&(Hash.parseBase58String("CwNh2tU6oMYJkjo3VnSTyyr9sYY9mQpPr7eEuBqdDevj") catch unreachable).data),
-        .static(&(Hash.parseBase58String("G2oUYokQXJBrALkpzjC2EnoV1cdKZnBVFYrWX1KWC1Ao") catch unreachable).data),
-        .static(&(Hash.parseBase58String("581v5cqFQ1UL65hKQPT3DEdzRDCG17ak41JWrceo7wdH") catch unreachable).data),
-        .static(&(Hash.parseBase58String("3LwXEdtyWt2GVYoWhPbh2rd9PcZEfYafdAXW874f5rUX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("Edo3wzDCbjhXSwXJdMm23LwACZBQxGmUtfh4j2ChYBYT") catch unreachable).data),
-        .static(&(Hash.parseBase58String("FWPXjkD2CsfnXpRyHzFJXhPDY4MwDMaKjom5LLA9rMmq") catch unreachable).data),
-        .static(&(Hash.parseBase58String("BGnbTWMweP3or8s681itz65bi1ocab1A8xBC9W24gUcX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("3bg4rkFGEYp6ZnmKzPBcgVZZWbxE3igFjZUZAYx2Ddwd") catch unreachable).data),
-        .static(&(Hash.parseBase58String("FP7DFB97czLG5tEzCvFfq8ryn4NNCeJ22sArYP65Qi6b") catch unreachable).data),
-        .static(&(Hash.parseBase58String("Bb5bNagXPrhZkNyZc4mNauxwfQtEqLZkXdVSKXzcvJEK") catch unreachable).data),
-        .static(&(Hash.parseBase58String("5GSV45miWUYEoaHoRqsZPUBpWuHBNvX21JdaK9hhp34s") catch unreachable).data),
-        .static(&(Hash.parseBase58String("4R812se79V9g3iSCcThn6MmPKN1udJvXRiUxof3JZbiX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("6VemdQJRFejPim7gKDU69DX45GgeBkj892RHiF1g3VL3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("8GE5FQkL1Txpzr6QoAg8BFBujBh9KYp6EDF58AMPc8XZ") catch unreachable).data),
-        .static(&(Hash.parseBase58String("4rmm9NdRofCaUbqyMgWxpuTU5gEdC9D3dTB1NdSP8qxs") catch unreachable).data),
-        .static(&(Hash.parseBase58String("EJkfUHsJZ8zigLy2AsEQdEWnw57oQ3ixQvFhoYeyDfBd") catch unreachable).data),
-        .static(&(Hash.parseBase58String("AeBDhZhRN3GiiqPCudr5gcyPnc6ob1yqrfFNfMMyncA3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HSbi9SZgihFPYnQUZnGzbvShMUwupcnevR76gb6vNQPH") catch unreachable).data),
-        .static(&(Hash.parseBase58String("9VpyR32aG5w2r5v4c7cHmfJ3YrhxWuibLr52TP9evG4X") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HnRisD9hpCmxxWBXZzWkTXi9kFdkSNqDjD9uZ8wFHKom") catch unreachable).data),
-        .static(&(Hash.parseBase58String("B1LaeYgZ5noLns3ScfTf6rV8MjB5PRj1iMybAGitvoAf") catch unreachable).data),
-        .static(&(Hash.parseBase58String("7LshGoCmGZsZTZnTQd5eieiBZaEMWedbSQ9p9Bp4HmUb") catch unreachable).data),
-        .static(&(Hash.parseBase58String("3YPTnKcKPNCC6yEfv4FnMDFCg8m7KAfP5w6sQwzLusY3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("41QJqQc9DruQ16nhUe3jSNHY84e2sfUHXvdcTrPsgZKu") catch unreachable).data),
-        .static(&(Hash.parseBase58String("7ngFGiJfPugBrJbJGK7iYZQnVAjG1wFWgK8gWjegvKaf") catch unreachable).data),
-        .static(&(Hash.parseBase58String("9yRBLtRJ8qgRKw9GwsCX2SAt3eiGRUWSe2zQ437BB9JP") catch unreachable).data),
-        .static(&(Hash.parseBase58String("2bZTtX1L5xyjx8fUiNZ4r3Riz7aNgTaJ61Unw31VGB11") catch unreachable).data),
-        .static(&(Hash.parseBase58String("3ZudUZTm9uhcnYG8rtgnecEKNAQUVxwNREKP9oFUTyYT") catch unreachable).data),
-        .static(&(Hash.parseBase58String("2oVRwpRQKs5GC2oX6FEJH5qvxDKojABMm5BQ1rTxkswM") catch unreachable).data),
-        .static(&(Hash.parseBase58String("6pmRPTGhKZ4WGfx39PEebgnkBwGsYRnTtfgUxzEa3ar3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("8DrZjLWMj6UfwEMsRfTKEGYzXtM3NiCYXkBvMWEDKgW3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("D5g22TZ4zeJGYRXhDREvqHWsCPascvLBuUamspjZTbUB") catch unreachable).data),
-        .static(&(Hash.parseBase58String("J2AHpfNSJj7zbPsDQa5Xs6tosfdCq4UtDFHdb9hY5fqy") catch unreachable).data),
-        .static(&(Hash.parseBase58String("EooYQHcHH3e8ztqqggP1KPtvwNSK56NJte2eb8sSAS3H") catch unreachable).data),
-        .static(&(Hash.parseBase58String("3KQYijRRysiEULupdQzbe8z6VTcsA9igjmn12hh7Bocj") catch unreachable).data),
-        .static(&(Hash.parseBase58String("ECjT1A5yqFWJBF8piU3Fg68yCQXghSxCf8bHFRzB3Uxo") catch unreachable).data),
-        .static(&(Hash.parseBase58String("xSa7rvJwRQDFHB24QkDvyHq8oUNDGgN8KXh1RYKjjmH") catch unreachable).data),
-        .static(&(Hash.parseBase58String("52FANf9qLdyTBRbApgqcVy29w1UHVtcddXwbGGmKdTg3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("CcTZTTgCMmZzD3p1UsF83A9wWKURqeD1KXhyLp88XFZ9") catch unreachable).data),
-        .static(&(Hash.parseBase58String("G6kCTjN8bMZEjHMu8ZcD1QTRZiRbtDJGREBBxgEr6YQw") catch unreachable).data),
-        .static(&(Hash.parseBase58String("wxEkJSDy4tWVnyBSN3ZhTnjDAzLqX5acMRMHpDPR3Qb") catch unreachable).data),
-        .static(&(Hash.parseBase58String("8RBNfhJp5Wx3kbJgQVs77DXtxRGLAAyLQ94JAeqvPnAb") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HeyxuA8nG6eBQZck7nYCGjwx44ygaGXKYsgdoZFfX9A7") catch unreachable).data),
-        .static(&(Hash.parseBase58String("5NLCrsx8TDiBXdFkMVwtkJHuEnmFxgQBLTsE8ofhfpn3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("7SfN8q1Le7TS5NnAdrbdMFYRTc9uk4zRqkNe2mZBZ7PD") catch unreachable).data),
-        .static(&(Hash.parseBase58String("Da6BCVUApgNwmUqQvjKjDiZYseJGMpF1khPhg9JUR2ZD") catch unreachable).data),
-        .static(&(Hash.parseBase58String("BDvj4GQPg2vRhvZo3oLBK9c2At4LfpQHZXcwTspEwcc7") catch unreachable).data),
-        .static(&(Hash.parseBase58String("FCnPbNQredzSapocfzP27gBpGDv6LyLuB5aVDn53q32X") catch unreachable).data),
-        .static(&(Hash.parseBase58String("DxE3FFxJgLsiMoSfkC3oGthXtpWoBix3J1zR7e2o9Zsm") catch unreachable).data),
-        .static(&(Hash.parseBase58String("6xjFToNyoxYmqz77qwkL9FuKToCEGNEx5kYEV9jz6ArB") catch unreachable).data),
-        .static(&(Hash.parseBase58String("AZ9roNkb7sNsBwqR4K23ThpUkxfKTiNbsgVKMQUb4EqM") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HCGY3iQG97de8nMV7Ze73hJUN61mdVj1CGRzF8WNc6jZ") catch unreachable).data),
-        .static(&(Hash.parseBase58String("EV8xB5xRaf9v5sH5QwcDVizSyCJ37PaZk6d4u8iPWpPZ") catch unreachable).data),
-        .static(&(Hash.parseBase58String("ZLzn5CxbJugfmgbEvPZC8CfmQihBjCxVjZgfd4yWD2o") catch unreachable).data),
-        .static(&(Hash.parseBase58String("An7jDtCRZRt9R9dCRwoeTSiCjSgBjKG7R1MQA2rZYu35") catch unreachable).data),
-        .static(&(Hash.parseBase58String("22STPnpwsScA24QTuAk6iYEVHDJ3cJgYgMaEjskiL8hD") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HFseWh7pnfJBy81osSULnRbUHbYRL2KFeq27VWTz9XVZ") catch unreachable).data),
-        .static(&(Hash.parseBase58String("DuYWx9awumJrujFugTyZForYbv9k2ABXvteDSvcS98Go") catch unreachable).data),
-        .static(&(Hash.parseBase58String("8g8CNKiVzg9jxU22AXRz2qhqDtncPWLTG3zLU3wdMMEX") catch unreachable).data),
-        .static(&(Hash.parseBase58String("xU7LRbwMWDHubdRFfoc5Z4eNZDxpkoVFXvgChyejfQK") catch unreachable).data),
-        .static(&(Hash.parseBase58String("CHUQaunM2KYWizY5nXij6Diz8ZyW28oHUxVkXKyy5LMm") catch unreachable).data),
-        .static(&(Hash.parseBase58String("B2MF8FcKqEZ3WPtvd1ezKMxj6ZqqaYx93zcYoYUzeRWP") catch unreachable).data),
-        .static(&(Hash.parseBase58String("CGikwne3JgRcj3SRLRFvaQPqpyo7i4aopbDA2SfEKg79") catch unreachable).data),
-        .static(&(Hash.parseBase58String("44UqPLsQB5V6PeNpV2e58EJbdmbkbJ4yvoUnqYBUwaw1") catch unreachable).data),
-        .static(&(Hash.parseBase58String("8F7qs8R2TTXwNxGZUEX29HPNV1sUnCsztdP9Ef9PYQej") catch unreachable).data),
-        .static(&(Hash.parseBase58String("JBbMa7FvLKTKnS6pyNirBRfzqUneviw9uyjRxmmthyaw") catch unreachable).data),
-        .static(&(Hash.parseBase58String("4piFFXTw2depcwingu1ASVEp8JzkMUNT9LaYKBJ6fmo5") catch unreachable).data),
-        .static(&(Hash.parseBase58String("FWgP5PAx6ZgzDKtLoCmPNySXtiyuP9zVD5p93rzwS5Uj") catch unreachable).data),
-        .static(&(Hash.parseBase58String("HRtH5B7YADRAJEfEKjYo14EH91VCQewe3yqRPPGcUJdm") catch unreachable).data),
-        .static(&(Hash.parseBase58String("6kUT8PQEbe5JqQgr8LNW9cF2XrwENZgsnK43SYgYjSLF") catch unreachable).data),
-        .static(&(Hash.parseBase58String("AbDt3gpQSSd4YdAnsAJcdm4hLg3qRJL9fkbqJP1jDG2j") catch unreachable).data),
-        .static(&(Hash.parseBase58String("4zXBE8HydrfTudtrF89aL56mQcWWQ67KCG3KJUrsMcE3") catch unreachable).data),
-        .static(&(Hash.parseBase58String("5MupSpZXygxYm9pwKFmRCfdSYKnkBrzP1qxsK97aL1Ys") catch unreachable).data),
-        .static(&(Hash.parseBase58String("9jLCWhZk9ocdTt24pEyeuLGPdG1yevKt8KQjsy6sTJKy") catch unreachable).data),
-        .static(&(Hash.parseBase58String("AKFgCyZQj2s38cUipfEwdUhARbGin46B5rBwW76cysyy") catch unreachable).data),
-        .static(&(Hash.parseBase58String("5BZ16sdyyR2fJfhA3QCEV1CVj3m6XwemqTwZB67b521V") catch unreachable).data),
-        .static(&(Hash.parseBase58String("2dYuPxZZSkv623zRD8YSFg4j8ARQCfTiy1j1EJSC4YYP") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Brqgfg9qhuU6BN29JvA1U2yUwd89evLxkGrPhgQ9T7GK") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("81T56cg6QzEjVM86Rroy5FCxFf6pwuXnj7DYXNeHNYP") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("36nEg9eQu2k9ZbjjgUN4wbsc7n5mNj6TbzXkUznJJ22B") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("GdWCqpD7scfusjv2XR5zGc72eN4WV3uJU9qqocPdz1Qb") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("VA51KKvmkQNuTVMn6i9K7Q3aZPx3Zc1DzTQdbBLrLWj") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("5kYLD3hcUBL119NCHvzxPLpB9AQRLCcvRdnh8LKmg1Ry") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("EYVsXqunwUb3F86SoX4FF7iySFtAJSdLKG7FgMtf3jcT") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Fv2sZfGeyMMTQJ4d4qTncp3WcC38P2AoRVBJsgVp8WCf") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("FPYkMwSAs6trDDL43XVm9M33KKkZ9TEvy8EarAcrPetX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("BfctqhCvJMMra4yU9bZhfk4WX6WgPHkrVxhqedrKQmJX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("ABZVpG53wJbQFy4KSdZRcaaQJXmRr7tXyo5LkDcYCEmm") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("BLWf8LmnMxRAv5w3RJ5mtGBmjcHbDBhGDqj5rVQgCZGK") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Eh15BA5rcEpy1urEVy6dHn1tiZ9wfet8nkM6CMqmacWT") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("EBfwhNr2qbhH2o1DRi4irs4fjhLEfMBfzYPbT2CBkjjV") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("DuhSdTShpk6XvCW79xXpBHcH9cEmRyktA9HcW38ivQ3R") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("CwNh2tU6oMYJkjo3VnSTyyr9sYY9mQpPr7eEuBqdDevj") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("G2oUYokQXJBrALkpzjC2EnoV1cdKZnBVFYrWX1KWC1Ao") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("581v5cqFQ1UL65hKQPT3DEdzRDCG17ak41JWrceo7wdH") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("3LwXEdtyWt2GVYoWhPbh2rd9PcZEfYafdAXW874f5rUX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Edo3wzDCbjhXSwXJdMm23LwACZBQxGmUtfh4j2ChYBYT") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("FWPXjkD2CsfnXpRyHzFJXhPDY4MwDMaKjom5LLA9rMmq") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("BGnbTWMweP3or8s681itz65bi1ocab1A8xBC9W24gUcX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("3bg4rkFGEYp6ZnmKzPBcgVZZWbxE3igFjZUZAYx2Ddwd") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("FP7DFB97czLG5tEzCvFfq8ryn4NNCeJ22sArYP65Qi6b") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Bb5bNagXPrhZkNyZc4mNauxwfQtEqLZkXdVSKXzcvJEK") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("5GSV45miWUYEoaHoRqsZPUBpWuHBNvX21JdaK9hhp34s") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("4R812se79V9g3iSCcThn6MmPKN1udJvXRiUxof3JZbiX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("6VemdQJRFejPim7gKDU69DX45GgeBkj892RHiF1g3VL3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("8GE5FQkL1Txpzr6QoAg8BFBujBh9KYp6EDF58AMPc8XZ") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("4rmm9NdRofCaUbqyMgWxpuTU5gEdC9D3dTB1NdSP8qxs") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("EJkfUHsJZ8zigLy2AsEQdEWnw57oQ3ixQvFhoYeyDfBd") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("AeBDhZhRN3GiiqPCudr5gcyPnc6ob1yqrfFNfMMyncA3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HSbi9SZgihFPYnQUZnGzbvShMUwupcnevR76gb6vNQPH") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("9VpyR32aG5w2r5v4c7cHmfJ3YrhxWuibLr52TP9evG4X") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HnRisD9hpCmxxWBXZzWkTXi9kFdkSNqDjD9uZ8wFHKom") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("B1LaeYgZ5noLns3ScfTf6rV8MjB5PRj1iMybAGitvoAf") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("7LshGoCmGZsZTZnTQd5eieiBZaEMWedbSQ9p9Bp4HmUb") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("3YPTnKcKPNCC6yEfv4FnMDFCg8m7KAfP5w6sQwzLusY3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("41QJqQc9DruQ16nhUe3jSNHY84e2sfUHXvdcTrPsgZKu") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("7ngFGiJfPugBrJbJGK7iYZQnVAjG1wFWgK8gWjegvKaf") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("9yRBLtRJ8qgRKw9GwsCX2SAt3eiGRUWSe2zQ437BB9JP") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("2bZTtX1L5xyjx8fUiNZ4r3Riz7aNgTaJ61Unw31VGB11") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("3ZudUZTm9uhcnYG8rtgnecEKNAQUVxwNREKP9oFUTyYT") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("2oVRwpRQKs5GC2oX6FEJH5qvxDKojABMm5BQ1rTxkswM") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("6pmRPTGhKZ4WGfx39PEebgnkBwGsYRnTtfgUxzEa3ar3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("8DrZjLWMj6UfwEMsRfTKEGYzXtM3NiCYXkBvMWEDKgW3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("D5g22TZ4zeJGYRXhDREvqHWsCPascvLBuUamspjZTbUB") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("J2AHpfNSJj7zbPsDQa5Xs6tosfdCq4UtDFHdb9hY5fqy") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("EooYQHcHH3e8ztqqggP1KPtvwNSK56NJte2eb8sSAS3H") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("3KQYijRRysiEULupdQzbe8z6VTcsA9igjmn12hh7Bocj") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("ECjT1A5yqFWJBF8piU3Fg68yCQXghSxCf8bHFRzB3Uxo") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("xSa7rvJwRQDFHB24QkDvyHq8oUNDGgN8KXh1RYKjjmH") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("52FANf9qLdyTBRbApgqcVy29w1UHVtcddXwbGGmKdTg3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("CcTZTTgCMmZzD3p1UsF83A9wWKURqeD1KXhyLp88XFZ9") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("G6kCTjN8bMZEjHMu8ZcD1QTRZiRbtDJGREBBxgEr6YQw") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("wxEkJSDy4tWVnyBSN3ZhTnjDAzLqX5acMRMHpDPR3Qb") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("8RBNfhJp5Wx3kbJgQVs77DXtxRGLAAyLQ94JAeqvPnAb") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HeyxuA8nG6eBQZck7nYCGjwx44ygaGXKYsgdoZFfX9A7") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("5NLCrsx8TDiBXdFkMVwtkJHuEnmFxgQBLTsE8ofhfpn3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("7SfN8q1Le7TS5NnAdrbdMFYRTc9uk4zRqkNe2mZBZ7PD") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("Da6BCVUApgNwmUqQvjKjDiZYseJGMpF1khPhg9JUR2ZD") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("BDvj4GQPg2vRhvZo3oLBK9c2At4LfpQHZXcwTspEwcc7") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("FCnPbNQredzSapocfzP27gBpGDv6LyLuB5aVDn53q32X") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("DxE3FFxJgLsiMoSfkC3oGthXtpWoBix3J1zR7e2o9Zsm") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("6xjFToNyoxYmqz77qwkL9FuKToCEGNEx5kYEV9jz6ArB") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("AZ9roNkb7sNsBwqR4K23ThpUkxfKTiNbsgVKMQUb4EqM") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HCGY3iQG97de8nMV7Ze73hJUN61mdVj1CGRzF8WNc6jZ") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("EV8xB5xRaf9v5sH5QwcDVizSyCJ37PaZk6d4u8iPWpPZ") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("ZLzn5CxbJugfmgbEvPZC8CfmQihBjCxVjZgfd4yWD2o") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("An7jDtCRZRt9R9dCRwoeTSiCjSgBjKG7R1MQA2rZYu35") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("22STPnpwsScA24QTuAk6iYEVHDJ3cJgYgMaEjskiL8hD") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HFseWh7pnfJBy81osSULnRbUHbYRL2KFeq27VWTz9XVZ") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("DuYWx9awumJrujFugTyZForYbv9k2ABXvteDSvcS98Go") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("8g8CNKiVzg9jxU22AXRz2qhqDtncPWLTG3zLU3wdMMEX") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("xU7LRbwMWDHubdRFfoc5Z4eNZDxpkoVFXvgChyejfQK") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("CHUQaunM2KYWizY5nXij6Diz8ZyW28oHUxVkXKyy5LMm") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("B2MF8FcKqEZ3WPtvd1ezKMxj6ZqqaYx93zcYoYUzeRWP") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("CGikwne3JgRcj3SRLRFvaQPqpyo7i4aopbDA2SfEKg79") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("44UqPLsQB5V6PeNpV2e58EJbdmbkbJ4yvoUnqYBUwaw1") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("8F7qs8R2TTXwNxGZUEX29HPNV1sUnCsztdP9Ef9PYQej") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("JBbMa7FvLKTKnS6pyNirBRfzqUneviw9uyjRxmmthyaw") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("4piFFXTw2depcwingu1ASVEp8JzkMUNT9LaYKBJ6fmo5") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("FWgP5PAx6ZgzDKtLoCmPNySXtiyuP9zVD5p93rzwS5Uj") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("HRtH5B7YADRAJEfEKjYo14EH91VCQewe3yqRPPGcUJdm") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("6kUT8PQEbe5JqQgr8LNW9cF2XrwENZgsnK43SYgYjSLF") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("AbDt3gpQSSd4YdAnsAJcdm4hLg3qRJL9fkbqJP1jDG2j") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("4zXBE8HydrfTudtrF89aL56mQcWWQ67KCG3KJUrsMcE3") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("5MupSpZXygxYm9pwKFmRCfdSYKnkBrzP1qxsK97aL1Ys") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("9jLCWhZk9ocdTt24pEyeuLGPdG1yevKt8KQjsy6sTJKy") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("AKFgCyZQj2s38cUipfEwdUhARbGin46B5rBwW76cysyy") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("5BZ16sdyyR2fJfhA3QCEV1CVj3m6XwemqTwZB67b521V") catch unreachable).data),
+        .managed(&(Hash.parseBase58String("2dYuPxZZSkv623zRD8YSFg4j8ARQCfTiy1j1EJSC4YYP") catch unreachable).data),
     });
 
     var pb_features = std.ArrayList(u64).init(allocator);
@@ -968,28 +1164,28 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
     var pb_accounts = std.ArrayList(pb.AcctState).init(allocator);
     try pb_accounts.appendSlice(&.{
         .{
-            .address = .static(&(Pubkey.parseBase58String("2mURtedre68vMJzQnDrb6f4XAuyRm7Tje8pujzDfvD9M") catch unreachable).data),
+            .address = .managed(&(Pubkey.parseBase58String("2mURtedre68vMJzQnDrb6f4XAuyRm7Tje8pujzDfvD9M") catch unreachable).data),
             .lamports = 9365460398065587802,
             .executable = true,
             .rent_epoch = 5155847230196380021,
-            .owner = .static(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
+            .owner = .managed(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
         },
         .{
-            .address = .static(&(Pubkey.parseBase58String("6CdPUpVZW1aXCK9gfNSjxnrySvH5mGgDdiuerUYeSRxq") catch unreachable).data),
+            .address = .managed(&(Pubkey.parseBase58String("6CdPUpVZW1aXCK9gfNSjxnrySvH5mGgDdiuerUYeSRxq") catch unreachable).data),
             .lamports = 2149935733931552121,
-            .data = .static(&.{
+            .data = .managed(&.{
                 1,   0,   0,   0,  1,   0,   0,   0,   125, 67,  195, 157, 3,   194, 128, 80,  194, 136, 101, 195, 165, 47,  194, 139, 195, 176, 194, 175, 86,  36,  122, 119,
                 194, 139, 50,  32, 105, 195, 158, 10,  14,  194, 185, 55,  195, 158, 195, 173, 15,  97,  195, 159, 57,  1,   38,  95,  195, 174, 194, 182, 36,  65,  96,  194,
                 132, 195, 168, 80, 194, 181, 76,  194, 191, 123, 13,  194, 128, 195, 175, 194, 136, 1,   195, 180, 194, 161, 58,  100, 194, 178, 194, 155, 195, 143, 80,  194,
                 187, 65,  68,  62, 194, 189, 194, 178, 67,  194, 182, 195, 172, 17,  33,  109,
             }),
             .rent_epoch = 15322425405372815508,
-            .owner = .static(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
+            .owner = .managed(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
         },
         .{
-            .address = .static(&(Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable).data),
+            .address = .managed(&(Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable).data),
             .lamports = 2314125629479449457,
-            .data = .static(&.{
+            .data = .managed(&.{
                 70,  0,   0,   0,   0,   0,   0,   0,   95,  71,  195, 183, 4,   194, 156, 194, 158, 195, 143, 15,  194, 159, 76,  27,  54,  194, 168, 84,  194, 167, 91,  103,
                 92,  73,  195, 130, 194, 130, 26,  57,  82,  15,  194, 168, 194, 143, 112, 195, 170, 195, 128, 194, 168, 194, 163, 19,  59,  101, 195, 184, 195, 144, 119, 195,
                 128, 120, 17,  55,  195, 144, 3,   194, 172, 127, 74,  0,   194, 161, 194, 154, 68,  20,  54,  194, 173, 37,  194, 168, 195, 168, 195, 168, 195, 139, 10,  100,
@@ -1125,26 +1321,26 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
                 112, 195, 161, 5,   194, 129, 46,  60,  195, 181, 31,  195, 185, 194, 185, 194, 128, 82,
             }),
             .rent_epoch = 4691045773770054888,
-            .owner = .static(&(Pubkey.parseBase58String("Sysvar1111111111111111111111111111111111111") catch unreachable).data),
+            .owner = .managed(&(Pubkey.parseBase58String("Sysvar1111111111111111111111111111111111111") catch unreachable).data),
         },
         .{
-            .address = .static(&(Pubkey.parseBase58String("9Ryytjr8fozTZEy6bUqXC5eU86rtVmPUEmmj7iLUj9Wg") catch unreachable).data),
+            .address = .managed(&(Pubkey.parseBase58String("9Ryytjr8fozTZEy6bUqXC5eU86rtVmPUEmmj7iLUj9Wg") catch unreachable).data),
             .lamports = 7686924270384124087,
             .executable = true,
             .rent_epoch = 7216444550539344568,
-            .owner = .static(&(Pubkey.parseBase58String("HfJBAKKCsfwScEwZLKUZau41WVNufhxzmZMnL1B3xNHX") catch unreachable).data),
+            .owner = .managed(&(Pubkey.parseBase58String("HfJBAKKCsfwScEwZLKUZau41WVNufhxzmZMnL1B3xNHX") catch unreachable).data),
         },
         .{
-            .address = .static(&(Pubkey.parseBase58String("2sndiBU5xRWBk2dGhWU1bZWJopxrmEMitjHAKNvXsyjm") catch unreachable).data),
+            .address = .managed(&(Pubkey.parseBase58String("2sndiBU5xRWBk2dGhWU1bZWJopxrmEMitjHAKNvXsyjm") catch unreachable).data),
             .lamports = 5191045593681845111,
-            .data = .static(&.{
+            .data = .managed(&.{
                 1,   0,   0,   0,   195, 191, 195, 191, 195, 191, 195, 191, 195, 191, 195, 191, 195, 191, 195, 191, 44,  194, 173, 195, 183, 40,  0,   0,   0,   0,   0,   1,
                 62,  195, 152, 11,  194, 154, 194, 130, 195, 183, 42,  92,  194, 187, 16,  114, 194, 140, 8,   194, 151, 91,  75,  61,  195, 186, 195, 140, 70,  74,  195, 137,
                 60,  194, 141, 114, 194, 153, 9,   40,  59,  105, 27,  194, 145, 194, 177, 195, 168, 6,   194, 167, 195, 149, 23,  25,  44,  86,  194, 142, 195, 160, 194, 138,
                 194, 132, 95,  115, 195, 146, 194, 151, 194, 136, 195, 143, 3,   1,   69,  194, 178, 26,  194, 179, 68,  195, 152, 6,   46,  194, 169, 64,  0,   0,
             }),
             .rent_epoch = 3739901766483084015,
-            .owner = .static(&(Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable).data),
+            .owner = .managed(&(Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable).data),
         },
     });
 
@@ -1155,39 +1351,39 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
                 .num_readonly_unsigned_accounts = 1,
             },
             .account_keys = .init(allocator),
-            .recent_blockhash = .static(&(Pubkey.parseBase58String("5VM6f4cVttMPcqEovhp9fg2ipKqAsQ2U23mrcUfJWgm") catch unreachable).data),
+            .recent_blockhash = .managed(&(Pubkey.parseBase58String("5VM6f4cVttMPcqEovhp9fg2ipKqAsQ2U23mrcUfJWgm") catch unreachable).data),
             .instructions = .init(allocator),
             .address_table_lookups = .init(allocator),
         },
-        .message_hash = .static(&(Hash.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
+        .message_hash = .managed(&(Hash.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
         .signatures = .init(allocator),
     };
 
     try pb_tx.message.?.account_keys.appendSlice(&.{
-        .static(&(Pubkey.parseBase58String("2mURtedre68vMJzQnDrb6f4XAuyRm7Tje8pujzDfvD9M") catch unreachable).data),
-        .static(&(Pubkey.parseBase58String("9Ryytjr8fozTZEy6bUqXC5eU86rtVmPUEmmj7iLUj9Wg") catch unreachable).data),
-        .static(&(Pubkey.parseBase58String("6CdPUpVZW1aXCK9gfNSjxnrySvH5mGgDdiuerUYeSRxq") catch unreachable).data),
-        .static(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
+        .managed(&(Pubkey.parseBase58String("2mURtedre68vMJzQnDrb6f4XAuyRm7Tje8pujzDfvD9M") catch unreachable).data),
+        .managed(&(Pubkey.parseBase58String("9Ryytjr8fozTZEy6bUqXC5eU86rtVmPUEmmj7iLUj9Wg") catch unreachable).data),
+        .managed(&(Pubkey.parseBase58String("6CdPUpVZW1aXCK9gfNSjxnrySvH5mGgDdiuerUYeSRxq") catch unreachable).data),
+        .managed(&(Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable).data),
     });
 
     try pb_tx.message.?.instructions.appendSlice(&.{.{
         .program_id_index = 3,
         .accounts = .init(allocator),
-        .data = .static(&.{ 4, 0, 0, 0 }),
+        .data = .managed(&.{ 4, 0, 0, 0 }),
     }});
     try pb_tx.message.?.instructions.items[0].accounts.appendSlice(&.{ 2, 4, 1, 3 });
 
     try pb_tx.message.?.address_table_lookups.appendSlice(&.{.{
-        .account_key = .static(&(Pubkey.parseBase58String("2sndiBU5xRWBk2dGhWU1bZWJopxrmEMitjHAKNvXsyjm") catch unreachable).data),
+        .account_key = .managed(&(Pubkey.parseBase58String("2sndiBU5xRWBk2dGhWU1bZWJopxrmEMitjHAKNvXsyjm") catch unreachable).data),
         .writable_indexes = .init(allocator),
         .readonly_indexes = .init(allocator),
     }});
     try pb_tx.message.?.address_table_lookups.items[0].readonly_indexes.append(0);
 
     try pb_tx.signatures.appendSlice(&.{
-        .static(&(Signature.parseBase58String("5J6RCYMNCZq2kqTHLS1XCHqtSTBEn6uVbyqa6wbrXAdXGQreHdjRvKufeWVbqhWHG6ATno74rEyzuvLbidVq1Pq9") catch unreachable).data),
-        .static(&(Signature.parseBase58String("ePsUp71bQrtnkePWJZDsV67LUFc9k35RtPEP8bvK3U1YemiHaNxz9UJZq39dd1GZXx9GRNxSU2QEH18EHMRiAHu") catch unreachable).data),
-        .static(&(Signature.parseBase58String("4Hdo6guPkSQ31Y1KHMKtKG69Uu7asCZuccqQUWeFnFGaAwSZdgG98Hsx7hrQ6BjTMjXFdYZim3qsNQ93JcKXUSNb") catch unreachable).data),
+        .managed(&(Signature.parseBase58String("5J6RCYMNCZq2kqTHLS1XCHqtSTBEn6uVbyqa6wbrXAdXGQreHdjRvKufeWVbqhWHG6ATno74rEyzuvLbidVq1Pq9") catch unreachable).data),
+        .managed(&(Signature.parseBase58String("ePsUp71bQrtnkePWJZDsV67LUFc9k35RtPEP8bvK3U1YemiHaNxz9UJZq39dd1GZXx9GRNxSU2QEH18EHMRiAHu") catch unreachable).data),
+        .managed(&(Signature.parseBase58String("4Hdo6guPkSQ31Y1KHMKtKG69Uu7asCZuccqQUWeFnFGaAwSZdgG98Hsx7hrQ6BjTMjXFdYZim3qsNQ93JcKXUSNb") catch unreachable).data),
     });
 
     return pb.TxnContext{
