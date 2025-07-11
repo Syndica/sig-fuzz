@@ -386,6 +386,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
     }
 
+    // NOTE: BREAKPOINT 1
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -399,8 +400,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .accounts_db = &accounts_db,
         .possible_accounts = &POSSIBLE_ACCOUNTS_0,
     });
-
-    if (true) return .{};
+    // if (true) return .{};
 
     // NOTE: The following logic should not impact txn fuzzing
     // let bank_forks = BankForks::new_rw_arc(bank);
@@ -414,18 +414,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     parent_slot = slot;
     parent_hash = Hash.ZEROES; // TODO: hopefully we don't need to compute the bank hash
     const parent_epoch = epoch;
-
-    // try printState(.{
-    //     .slot = slot,
-    //     .epoch = epoch,
-    //     .hash = parent_hash,
-    //     .parent_slot = parent_slot,
-    //     .parent_hash = parent_hash,
-    //     .ancestors = ancestors,
-    //     .sysvar_cache = sysvar_cache,
-    //     .accounts_db = &accounts_db,
-    //     .expected_accounts = &SAMPLE_0_EXPECTED_ACCOUNTS_0,
-    // });
 
     slot = loadSlot(&pb_txn_ctx);
     if (slot > 0) {
@@ -567,6 +555,22 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         // ProgramCache::prune(slot, epoch)
         {}
     }
+
+    // NOTE: BREAKPOINT 2
+    try writeState(allocator, .{
+        .slot = slot,
+        .epoch = epoch,
+        .hash = Hash.ZEROES,
+        .parent_slot = parent_slot,
+        .parent_hash = parent_hash,
+        .ancestors = ancestors,
+        .rent = genesis_config.rent,
+        .epoch_schedule = epoch_schedule,
+        .sysvar_cache = sysvar_cache,
+        .accounts_db = &accounts_db,
+        .possible_accounts = &POSSIBLE_ACCOUNTS_0,
+    });
+    if (true) return .{};
 
     // Load accounts into accounts db
     for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
@@ -924,7 +928,7 @@ const State = struct {
     epoch_schedule: EpochSchedule,
     sysvar_cache: SysvarCache,
     accounts_db: *AccountsDb,
-    possible_accounts: []const struct { Slot, Pubkey },
+    possible_accounts: []const Pubkey,
 };
 
 fn writeState(allocator: Allocator, state: State) !void {
@@ -952,25 +956,20 @@ fn writeAccounts(
     allocator: Allocator,
     writer: anytype,
     accounts_db: *AccountsDb,
-    expected_accounts: []const struct { Slot, Pubkey },
+    expected_accounts: []const Pubkey,
 ) !void {
     try writer.print("Accounts:\n", .{});
-    for (expected_accounts) |slot_pubkey| {
-        const slot, const pubkey = slot_pubkey;
-
-        var ancestors = Ancestors{};
-        defer ancestors.deinit(allocator);
-        try ancestors.addSlot(allocator, slot);
-
-        const maybe_account = try accounts_db.getAccountWithAncestors(&pubkey, &ancestors);
-        if (maybe_account) |account| {
+    for (expected_accounts) |pubkey| {
+        const maybe_slot_and_account = accounts_db.getSlotAndAccount(&pubkey) catch null;
+        if (maybe_slot_and_account) |slot_and_account| {
+            const slot, const account = slot_and_account;
             defer account.deinit(allocator);
             const data = try account.data.dupeAllocatedOwned(allocator);
             defer data.deinit(allocator);
 
-            try writer.print("  slot={}, pubkey={}, lamports={}, owner={}, executable={}, rent_epoch={}", .{
-                slot,
+            try writer.print("  {}: slot={}, lamports={}, owner={}, executable={}, rent_epoch={}", .{
                 pubkey,
+                slot,
                 account.lamports,
                 account.owner,
                 account.executable,
@@ -990,28 +989,30 @@ fn writeSlice(allocator: Allocator, writer: anytype, prefix: []const u8, suffix:
     try writer.print("{s}{s}{s}", .{ prefix, str[1 .. str.len - 1], suffix });
 }
 
-const POSSIBLE_ACCOUNTS_0 = [_]struct { Slot, Pubkey }{
-    .{ 0, Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("BPFLoader1111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("BPFLoader2111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("BPFLoaderUpgradeab1e11111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("ComputeBudget111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("Config1111111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("Ed25519SigVerify111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("KeccakSecp256k11111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("LoaderV411111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("Secp256r1SigVerify1111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("Stake11111111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarC1ock11111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarEpochSchedu1e111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarLastRestartS1ot1111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarRent111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("SysvarStakeHistory1111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("Vote111111111111111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("ZkE1Gama1Proof11111111111111111111111111111") catch unreachable },
-    .{ 0, Pubkey.parseBase58String("ZkTokenProof1111111111111111111111111111111") catch unreachable },
+const POSSIBLE_ACCOUNTS_0 = [_]Pubkey{
+    Pubkey.parseBase58String("11111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("AddressLookupTab1e1111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("BPFLoader1111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("BPFLoader2111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("BPFLoaderUpgradeab1e11111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("ComputeBudget111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("Config1111111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("Ed25519SigVerify111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("KeccakSecp256k11111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("LoaderV411111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("Secp256r1SigVerify1111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("Stake11111111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarC1ock11111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarEpochRewards1111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarEpochSchedu1e111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarLastRestartS1ot1111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarRecentB1ockHashes11111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarRent111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarS1otHashes111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("SysvarStakeHistory1111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("Vote111111111111111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("ZkE1Gama1Proof11111111111111111111111111111") catch unreachable,
+    Pubkey.parseBase58String("ZkTokenProof1111111111111111111111111111111") catch unreachable,
 };
 
 test "sampleTxnContext" {
