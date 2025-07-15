@@ -184,12 +184,12 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     defer blockhash_queue.deinit(allocator);
 
     var epoch_stakes_map = EpochStakesMap{};
-    defer epoch_stakes_map.deinit(allocator);
+    defer deinitMapAndValues(allocator, epoch_stakes_map);
 
     var hard_forks = HardForks{};
     defer hard_forks.deinit(allocator);
 
-    var stakes_cache = StakesCache.default();
+    var stakes_cache = try StakesCache.init(allocator);
     defer stakes_cache.deinit(allocator);
 
     var sysvar_cache = SysvarCache{};
@@ -354,7 +354,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         // Add epoch stakes for all epochs up to the banks slot using banks stakes cache
         // The bank slot is 0 and stakes cache is empty, so we add default epoch stakes.
         for (0..epoch_schedule.getLeaderScheduleEpoch(epoch)) |e| {
-            try epoch_stakes_map.put(allocator, e, EpochStakes.DEFAULT);
+            try epoch_stakes_map.put(allocator, e, try .init(allocator));
         }
 
         const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{

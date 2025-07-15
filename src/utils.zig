@@ -100,8 +100,8 @@ pub fn createTransactionContext(
     errdefer comptime unreachable;
 
     if (sysvar_cache.get(sysvar.RecentBlockhashes) catch null) |recent_blockhashes| {
-        if (recent_blockhashes.entries.items.len > 0) {
-            const prev_entry = recent_blockhashes.entries.items[recent_blockhashes.entries.items.len - 1];
+        if (recent_blockhashes.entries.len > 0) {
+            const prev_entry = recent_blockhashes.entries.buffer[recent_blockhashes.entries.len - 1];
             tc.prev_blockhash = prev_entry.blockhash;
             tc.prev_lamports_per_signature = prev_entry.lamports_per_signature;
         }
