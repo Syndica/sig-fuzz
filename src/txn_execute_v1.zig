@@ -391,19 +391,18 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
     }
 
-    // try writeState(allocator, .{
-    //     .slot = slot,
-    //     .epoch = epoch,
-    //     .hash = Hash.ZEROES,
-    //     .parent_slot = parent_slot,
-    //     .parent_hash = parent_hash,
-    //     .ancestors = ancestors,
-    //     .rent = genesis_config.rent,
-    //     .epoch_schedule = epoch_schedule,
-    //     .sysvar_cache = sysvar_cache,
-    //     .accounts_db = &accounts_db,
-    // });
-    // if (true) return .{};
+    try writeState(allocator, .{
+        .slot = slot,
+        .epoch = epoch,
+        .hash = Hash.ZEROES,
+        .parent_slot = parent_slot,
+        .parent_hash = parent_hash,
+        .ancestors = ancestors,
+        .rent = genesis_config.rent,
+        .epoch_schedule = epoch_schedule,
+        .sysvar_cache = sysvar_cache,
+        .accounts_db = &accounts_db,
+    });
 
     // NOTE: The following logic should not impact txn fuzzing
     // let bank_forks = BankForks::new_rw_arc(bank);
@@ -560,33 +559,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         {}
     }
 
-    // // NOTE: BREAKPOINT
-    // try writeState(allocator, .{
-    //     .slot = slot,
-    //     .epoch = epoch,
-    //     .hash = Hash.ZEROES,
-    //     .parent_slot = parent_slot,
-    //     .parent_hash = parent_hash,
-    //     .ancestors = ancestors,
-    //     .rent = genesis_config.rent,
-    //     .epoch_schedule = epoch_schedule,
-    //     .sysvar_cache = sysvar_cache,
-    //     .accounts_db = &accounts_db,
-    // });
-    // if (true) return .{};
-
-    // Load accounts into accounts db
-    for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
-        try accounts_db.putAccount(slot, pubkey, .{
-            .lamports = account.lamports,
-            .data = account.data,
-            .owner = account.owner,
-            .executable = account.executable,
-            .rent_epoch = account.rent_epoch,
-        });
-    }
-
-    // NOTE: BREAKPOINT
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -599,6 +571,17 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .sysvar_cache = sysvar_cache,
         .accounts_db = &accounts_db,
     });
+
+    // Load accounts into accounts db
+    for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
+        try accounts_db.putAccount(slot, pubkey, .{
+            .lamports = account.lamports,
+            .data = account.data,
+            .owner = account.owner,
+            .executable = account.executable,
+            .rent_epoch = account.rent_epoch,
+        });
+    }
 
     // Reset and fill sysvar cache
     sysvar_cache.reset(allocator);
@@ -653,20 +636,19 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     sysvar_cache.reset(allocator);
     try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
 
-    // // NOTE: BREAKPOINT
-    // try writeState(allocator, .{
-    //     .slot = slot,
-    //     .epoch = epoch,
-    //     .hash = Hash.ZEROES,
-    //     .parent_slot = parent_slot,
-    //     .parent_hash = parent_hash,
-    //     .ancestors = ancestors,
-    //     .rent = genesis_config.rent,
-    //     .epoch_schedule = epoch_schedule,
-    //     .sysvar_cache = sysvar_cache,
-    //     .accounts_db = &accounts_db,
-    // });
-    // if (true) return .{};
+    try writeState(allocator, .{
+        .slot = slot,
+        .epoch = epoch,
+        .hash = Hash.ZEROES,
+        .parent_slot = parent_slot,
+        .parent_hash = parent_hash,
+        .ancestors = ancestors,
+        .rent = genesis_config.rent,
+        .epoch_schedule = epoch_schedule,
+        .sysvar_cache = sysvar_cache,
+        .accounts_db = &accounts_db,
+    });
+    if (true) return .{};
 
     // BEGIN TRANSACTION EXECUTION
     std.debug.print("Verifying transaction...\n", .{});
