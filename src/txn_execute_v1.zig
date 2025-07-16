@@ -267,7 +267,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             // Set reward pool pubkeys
             std.debug.assert(genesis_config.rewards_pools.count() == 0);
 
-            // TODO: apply feature activations
             try bank_methods.applyFeatureActivations(
                 allocator,
                 slot,
@@ -276,15 +275,15 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 false,
             );
 
+            // TODO: This gets hit
             // Set limits for 50m block limits
             // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_50M)) {
-            //     // TODO: This gets hit
             //     @panic("set limits not implemented");
             // }
 
+            // TODO: This gets hit
             // Set limits for 60m block limits
             // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_60M)) {
-            //     // TODO: This gets hit
             //     @panic("set limits not implemented");
             // }
 
@@ -392,19 +391,19 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
     }
 
-    try writeState(allocator, .{
-        .slot = slot,
-        .epoch = epoch,
-        .hash = Hash.ZEROES,
-        .parent_slot = parent_slot,
-        .parent_hash = parent_hash,
-        .ancestors = ancestors,
-        .rent = genesis_config.rent,
-        .epoch_schedule = epoch_schedule,
-        .sysvar_cache = sysvar_cache,
-        .accounts_db = &accounts_db,
-    });
-    if (true) return .{};
+    // try writeState(allocator, .{
+    //     .slot = slot,
+    //     .epoch = epoch,
+    //     .hash = Hash.ZEROES,
+    //     .parent_slot = parent_slot,
+    //     .parent_hash = parent_hash,
+    //     .ancestors = ancestors,
+    //     .rent = genesis_config.rent,
+    //     .epoch_schedule = epoch_schedule,
+    //     .sysvar_cache = sysvar_cache,
+    //     .accounts_db = &accounts_db,
+    // });
+    // if (true) return .{};
 
     // NOTE: The following logic should not impact txn fuzzing
     // let bank_forks = BankForks::new_rw_arc(bank);
