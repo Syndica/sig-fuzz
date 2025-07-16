@@ -73,7 +73,6 @@ pub fn applyFeatureActivations(
         allow_new_activations,
     );
 
-    // Update activation slot of features in `new_feature_activations`
     for (new_feature_activations.keys()) |feature_id| {
         const db_account = try tryGetAccount(accounts_db, feature_id) orelse continue;
         defer db_account.deinit(allocator);
@@ -89,7 +88,6 @@ pub fn applyFeatureActivations(
     }
 
     // Update active set of reserved account keys which are not allowed to be write locked
-    // TODO
     // self.reserved_account_keys = {
     //     let mut reserved_keys = ReservedAccountKeys::clone(&self.reserved_account_keys);
     //     reserved_keys.update_active_set(&self.feature_set);
@@ -97,8 +95,7 @@ pub fn applyFeatureActivations(
     // };
 
     if (new_feature_activations.contains(features.PICO_INFLATION)) {
-        std.debug.print("Activating pico inflation at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating pico inflation at slot {}\n", .{slot});
         // *self.inflation.write().unwrap() = Inflation::pico();
         // self.fee_rate_governor.burn_percent = 50; // 50% fee burn
         // self.rent_collector.rent.burn_percent = 50; // 50% rent burn
@@ -114,14 +111,12 @@ pub fn applyFeatureActivations(
         break :blk true;
     };
     if (!is_disjoint) {
-        std.debug.print("Activating full inflation at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating full inflation at slot {}\n", .{slot});
         // *self.inflation.write().unwrap() = Inflation::full();
         // self.fee_rate_governor.burn_percent = 50; // 50% fee burn
         // self.rent_collector.rent.burn_percent = 50; // 50% rent burn
     }
 
-    // TODO
     try applyBuiltinProgramFeatureTransitions(
         allocator,
         slot,
@@ -132,46 +127,39 @@ pub fn applyFeatureActivations(
     );
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK)) {
-        std.debug.print("Activating update hashes per tick at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(DEFAULT_HASHES_PER_TICK);
 
     }
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK2)) {
-        std.debug.print("Activating update hashes per tick 2 at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick 2 at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(UPDATED_HASHES_PER_TICK2);
 
     }
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK3)) {
-        std.debug.print("Activating update hashes per tick 3 at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick 3 at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(UPDATED_HASHES_PER_TICK3);
     }
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK4)) {
-        std.debug.print("Activating update hashes per tick 4 at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick 4 at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(UPDATED_HASHES_PER_TICK4);
     }
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK5)) {
-        std.debug.print("Activating update hashes per tick 5 at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick 5 at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(UPDATED_HASHES_PER_TICK5);
     }
 
     if (new_feature_activations.contains(features.UPDATE_HASHES_PER_TICK6)) {
-        std.debug.print("Activating update hashes per tick 6 at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating update hashes per tick 6 at slot {}\n", .{slot});
         // self.apply_updated_hashes_per_tick(UPDATED_HASHES_PER_TICK6);
     }
 
     if (new_feature_activations.contains(features.ACCOUNTS_LT_HASH)) {
-        std.debug.print("Activating accounts lt hash at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating accounts lt hash at slot {}\n", .{slot});
         // // Activating the accounts lt hash feature means we need to have an accounts lt hash
         // // value at the end of this if-block.  If the cli arg has been used, that means we
         // // already have an accounts lt hash and do not need to recalculate it.
@@ -219,8 +207,7 @@ pub fn applyFeatureActivations(
     if (new_feature_activations.contains(features.RAISE_BLOCK_LIMITS_TO_50M) and
         !feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_60M))
     {
-        std.debug.print("Activating raise block limits to 50M at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating raise block limits to 50M at slot {}\n", .{slot});
         // let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
         // self.write_cost_tracker().unwrap().set_limits(
         //     account_cost_limit,
@@ -231,8 +218,7 @@ pub fn applyFeatureActivations(
     }
 
     if (new_feature_activations.contains(features.RAISE_BLOCK_LIMITS_TO_60M)) {
-        std.debug.print("Activating raise block limits to 60M at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Activating raise block limits to 60M at slot {}\n", .{slot});
         // let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0256_block_limits();
         // self.write_cost_tracker().unwrap().set_limits(
         //     account_cost_limit,
@@ -243,8 +229,7 @@ pub fn applyFeatureActivations(
     }
 
     if (new_feature_activations.contains(features.REMOVE_ACCOUNTS_DELTA_HASH)) {
-        std.debug.print("Removing accounts delta hash at slot {}\n", .{slot});
-        // TODO
+        std.debug.panic("Removing accounts delta hash at slot {}\n", .{slot});
         // // If the accounts delta hash has been removed, then we no longer need to compute the
         // // AccountHash for modified accounts, and can stop the background account hasher.
         // self.rc.accounts.accounts_db.stop_background_hasher();
@@ -263,11 +248,7 @@ fn applyBuiltinProgramFeatureTransitions(
         var is_core_bpf = false;
         if (builtin_program.core_bpf_migration_config) |core_bpf_config| {
             if (new_feature_activations.contains(core_bpf_config.enable_feature_id)) {
-                if (true) @panic("not expected by fuzz harness");
-                migrateBuiltinProgramToCoreBpf() catch |err| {
-                    std.debug.print("Failed to migrate builtin program {} to Core BPF: {}\n", .{ builtin_program.program_id, err });
-                    return err;
-                };
+                migrateBuiltinProgramToCoreBpf();
                 is_core_bpf = true;
             } else {
                 const maybe_account = try tryGetAccount(accounts_db, builtin_program.program_id);
@@ -306,10 +287,7 @@ fn applyBuiltinProgramFeatureTransitions(
     for (builtins.STATELESS_BUILTINS) |builtin_program| {
         const core_bpf_config = builtin_program.core_bpf_migration_config orelse continue;
         if (new_feature_activations.contains(core_bpf_config.enable_feature_id)) {
-            migrateBuiltinProgramToCoreBpf() catch |err| {
-                std.debug.print("Failed to migrate stateless builtin program {} to Core BPF: {}\n", .{ builtin_program.program_id, err });
-                return err;
-            };
+            migrateBuiltinProgramToCoreBpf();
         }
     }
 
@@ -332,7 +310,7 @@ fn applyBuiltinProgramFeatureTransitions(
 }
 
 fn migrateBuiltinProgramToCoreBpf() !void {
-    @panic("Unimplemented: migrateBuiltinProgramToCoreBpf");
+    @panic("migrateBuiltinProgramToCoreBpf not implemented");
 }
 
 fn computeActiveFeatureSet(
