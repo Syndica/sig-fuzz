@@ -49,7 +49,7 @@ pub fn createTransactionContext(
     else
         try allocator.create(EpochStakes);
 
-    epoch_stakes.* = try EpochStakes.initEmpty(allocator);
+    epoch_stakes.* = try EpochStakes.initEmptyWithGenesisStakeHistoryEntry(allocator);
 
     const sysvar_cache = if (environment.sysvar_cache) |ptr|
         ptr

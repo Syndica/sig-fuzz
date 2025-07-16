@@ -309,7 +309,7 @@ fn applyBuiltinProgramFeatureTransitions(
     }
 }
 
-fn migrateBuiltinProgramToCoreBpf() !void {
+fn migrateBuiltinProgramToCoreBpf() void {
     @panic("migrateBuiltinProgramToCoreBpf not implemented");
 }
 
