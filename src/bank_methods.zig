@@ -58,6 +58,20 @@ const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
 
 const failing_allocator = sig.utils.allocators.failing.allocator(.{});
 
+// Bank::process_new_epoch(...)
+pub fn processNewEpoch() !void {
+    // TODO
+}
+
+pub fn updateEpochStakes(leader_schedule_epoch: Epoch) !void {
+    // TODO
+    _ = leader_schedule_epoch; 
+}
+
+pub fn distributePartitionedEpochRewards() !void {
+    // TODO
+}
+
 pub fn applyFeatureActivations(
     allocator: Allocator,
     slot: u64,

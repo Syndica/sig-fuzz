@@ -486,17 +486,16 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             // Create ancestors with new slot and all parent slots
             try ancestors.addSlot(allocator, slot);
 
-            // Process new epoch (if we are here we know that the parent epoch is 0 in the txn fuzzing context
-            // otherwise we would check if the new epoch is greater than the parent epoch)
-            // Bank::process_new_epoch(...)
-            {}
-
-            // Distrubute partitioned epoch rewards
-            // new.distribute_partitioned_epoch_rewards(...)
-            {}
+            // Update epoch
+            if (parent_epoch < epoch) {
+                try bank_methods.processNewEpoch();
+            } else {
+                const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(epoch);
+                try bank_methods.updateEpochStakes(leader_schedule_epoch);
+            }
+            try bank_methods.distributePartitionedEpochRewards();
 
             // Prepare program cache for upcoming feature set
-            {}
 
             // Update sysvars
             {
@@ -571,6 +570,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .sysvar_cache = sysvar_cache,
         .accounts_db = &accounts_db,
     });
+
+    try accounts_db.putAccount(slot, program.address_lookup_table.ID, AccountSharedData.EMPTY);
+    try accounts_db.putAccount(slot, program.config.ID, AccountSharedData.EMPTY);
 
     // Load accounts into accounts db
     for (accounts_map.keys(), accounts_map.values()) |pubkey, account| {
@@ -999,6 +1001,7 @@ fn writeAccounts(
         if (maybe_slot_and_account) |slot_and_account| {
             const slot, const account = slot_and_account;
             defer account.deinit(allocator);
+            if (account.lamports == 0) continue;
             const data = try account.data.dupeAllocatedOwned(allocator);
             defer data.deinit(allocator);
 
