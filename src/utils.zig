@@ -4,7 +4,7 @@ const sig = @import("sig");
 
 const ManagedString = @import("protobuf").ManagedString;
 
-const features = sig.runtime.features;
+const features = sig.core.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 const memory = sig.vm.memory;
@@ -15,7 +15,7 @@ const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
-const FeatureSet = sig.runtime.FeatureSet;
+const FeatureSet = sig.core.FeatureSet;
 const SysvarCache = sig.runtime.SysvarCache;
 const EpochStakes = sig.core.stake.EpochStakes;
 const ProgramMap = sig.runtime.program_loader.ProgramMap;

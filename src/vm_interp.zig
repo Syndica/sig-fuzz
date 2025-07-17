@@ -7,7 +7,7 @@ const utils = @import("utils.zig");
 const serialize = sig.runtime.program.bpf.serialize;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
-const features = sig.runtime.features;
+const features = sig.core.features;
 const SyscallContext = pb.SyscallContext;
 const Pubkey = sig.core.Pubkey;
 const svm = sig.vm;
@@ -76,7 +76,7 @@ fn executeVmTest(
         });
     }
 
-    var feature_set = try allocator.create(sig.runtime.FeatureSet);
+    var feature_set = try allocator.create(sig.core.FeatureSet);
     feature_set.* = try utils.createFeatureSet(allocator, instr_context);
     var tc: sig.runtime.TransactionContext = undefined;
     try utils.createTransactionContext(
@@ -364,7 +364,7 @@ fn stub(
 // [agave] https://github.com/anza-xyz/agave/blob/a2af4430d278fcf694af7a2ea5ff64e8a1f5b05b/programs/bpf_loader/src/syscalls/mod.rs#L335
 pub fn createSyscallRegistry(
     allocator: std.mem.Allocator,
-    feature_set: *const sig.runtime.FeatureSet,
+    feature_set: *const sig.core.FeatureSet,
     is_deploy: bool,
 ) !svm.Registry(svm.Syscall) {
     // Register syscalls
