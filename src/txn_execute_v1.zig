@@ -192,15 +192,13 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     var stakes_cache = try StakesCache.init(allocator);
     defer stakes_cache.deinit(allocator);
 
-    var sysvar_cache = SysvarCache{};
-    defer sysvar_cache.deinit(allocator);
-
     var vm_environment = vm.Environment{};
     defer vm_environment.deinit(allocator);
 
     var capitalization = Atomic(u64).init(0);
 
     // Bank::new_with_paths(...)
+    // https://github.com/firedancer-io/agave/blob/10fe1eb29aac9c236fd72d08ae60a3ef61ee8353/runtime/src/bank.rs#L1162
     {
         try ancestors.addSlot(allocator, 0);
         // bank.compute_budget = runtime_config.compute_budget;
@@ -210,6 +208,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         // bank.feature_set = feature_set;
 
         // Bank::process_genesis_config(...)
+        // https://github.com/firedancer-io/agave/blob/10fe1eb29aac9c236fd72d08ae60a3ef61ee8353/runtime/src/bank.rs#L2727
         {
             // Set the feee rate governor
             fee_rate_govenor = genesis_config.fee_rate_governor;
@@ -263,6 +262,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         }
 
         // Bank::finish_init(...)
+        // https://github.com/firedancer-io/agave/blob/10fe1eb29aac9c236fd72d08ae60a3ef61ee8353/runtime/src/bank.rs#L4863
         {
             // Set reward pool pubkeys
             std.debug.assert(genesis_config.rewards_pools.count() == 0);
@@ -388,9 +388,12 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         try update_sysvar.updateEpochSchedule(allocator, epoch_schedule, update_sysvar_deps);
         try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
         try update_sysvar.updateLastRestartSlot(allocator, &feature_set, &hard_forks, update_sysvar_deps);
-        try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
+
+        // NOTE: Agave fills the sysvar cache here, we should not need for txn fuzzing as the sysvar cache is only used in the SVM, so we can
+        // populate immediately before executing transactions. (I think....)
     }
 
+    // Checkpoint 1
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -400,7 +403,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .ancestors = ancestors,
         .rent = genesis_config.rent,
         .epoch_schedule = epoch_schedule,
-        .sysvar_cache = sysvar_cache,
         .accounts_db = &accounts_db,
     });
 
@@ -410,16 +412,16 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     //     bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_forks));
     // let mut bank = bank_forks.read().unwrap().root_bank();
     //     Just gets the root bank
+
+    // TODO: use `hashSlot` to compute the slot hash
     // bank.rehash();
-    //     Hashes the bank state, should be irrelevant for txn fuzzing
 
     parent_slot = slot;
-    parent_hash = Hash.ZEROES; // TODO: hopefully we don't need to compute the bank hash
+    parent_hash = Hash.ZEROES; // TODO: use computed slot hash
     const parent_epoch = epoch;
 
     slot = loadSlot(&pb_txn_ctx);
     if (slot > 0) {
-        // [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/sysvar.rs:47:9] "create_epoch_rewards_sysvar" = "create_epoch_rewards_sysvar"
         // Bank::new_from_parent(...)
         {
             // Clone epoch schedule
@@ -461,9 +463,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
             // Create new transaction processor
             // const transaction_processor = TransactionBatchProcessor::new_from(&parent.transaction_processor, slot, epoch);
-            {
-                sysvar_cache.reset(allocator);
-            }
 
             // Clone rewards pool pubkeys
             // const rewards_pools = parent.rewards_pools.clone();
@@ -488,7 +487,15 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
             // Update epoch
             if (parent_epoch < epoch) {
-                try bank_methods.processNewEpoch();
+                try bank_methods.processNewEpoch(
+                    allocator,
+                    epoch,
+                    slot,
+                    parent_epoch,
+                    parent_slot,
+                    &feature_set,
+                    &accounts_db,
+                );
             } else {
                 const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(epoch);
                 try bank_methods.updateEpochStakes(leader_schedule_epoch);
@@ -536,11 +543,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 try update_sysvar.updateLastRestartSlot(allocator, &feature_set, &hard_forks, update_sysvar_deps);
             }
 
-            // Fill missing sysvar cache entries
-            try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
-
             // Get num accounts modified by this slot if accounts lt hash enabled
-            {}
 
             // A bunch of stats stuff...
         }
@@ -558,6 +561,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         {}
     }
 
+    // Checkpoint 2
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -567,10 +571,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .ancestors = ancestors,
         .rent = genesis_config.rent,
         .epoch_schedule = epoch_schedule,
-        .sysvar_cache = sysvar_cache,
         .accounts_db = &accounts_db,
     });
 
+    // Remove address lookup table and config program accounts by inserting empty accounts (zero-lamports)
     try accounts_db.putAccount(slot, program.address_lookup_table.ID, AccountSharedData.EMPTY);
     try accounts_db.putAccount(slot, program.config.ID, AccountSharedData.EMPTY);
 
@@ -584,10 +588,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             .rent_epoch = account.rent_epoch,
         });
     }
-
-    // Reset and fill sysvar cache
-    sysvar_cache.reset(allocator);
-    try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
 
     // Update epoch schedule and rent to minimum rent exempt balance
     {
@@ -605,6 +605,16 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     // Get lamports per signature from first entry in recent blockhashes
     const lamports_per_signature = blk: {
+        var sysvar_cache = SysvarCache{};
+        defer sysvar_cache.deinit(allocator);
+
+        try update_sysvar.fillMissingSysvarCacheEntries(
+            allocator,
+            &accounts_db,
+            &ancestors,
+            &sysvar_cache,
+        );
+
         const recent_blockhashes = sysvar_cache.get(RecentBlockhashes) catch
             break :blk null;
 
@@ -617,27 +627,20 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             null;
     } orelse fee_rate_govenor.lamports_per_signature;
 
-    // Register blockhashes
+    // Register blockhashes and update recent blockhashes sysvar
     for (blockhashes) |blockhash| {
         try blockhash_queue.insertHash(allocator, blockhash, lamports_per_signature);
     }
+    const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
+        .accounts_db = &accounts_db,
+        .capitalization = &capitalization,
+        .ancestors = &ancestors,
+        .rent = &genesis_config.rent,
+        .slot = slot,
+    };
+    try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
 
-    // Update recent blockhashes
-    {
-        const update_sysvar_deps = update_sysvar.UpdateSysvarAccountDeps{
-            .accounts_db = &accounts_db,
-            .capitalization = &capitalization,
-            .ancestors = &ancestors,
-            .rent = &genesis_config.rent,
-            .slot = slot,
-        };
-        try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
-    }
-
-    // Reset and fill sysvar cache
-    sysvar_cache.reset(allocator);
-    try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
-
+    // Checkpoint 3
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -647,29 +650,28 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .ancestors = ancestors,
         .rent = genesis_config.rent,
         .epoch_schedule = epoch_schedule,
-        .sysvar_cache = sysvar_cache,
         .accounts_db = &accounts_db,
     });
-    if (true) return .{};
 
-    // BEGIN TRANSACTION EXECUTION
-    std.debug.print("Verifying transaction...\n", .{});
+    // Initialize and populate the sysvar cache
+    var sysvar_cache = SysvarCache{};
+    defer sysvar_cache.deinit(allocator);
+    try update_sysvar.fillMissingSysvarCacheEntries(allocator, &accounts_db, &ancestors, &sysvar_cache);
+
+    // Load transaction from protobuf context
     const transaction = try loadTransaction(allocator, &pb_txn_ctx);
     defer transaction.deinit(allocator);
 
-    const verify_transaction_result = try verify_transaction.verifyTransaction(
+    // Verify transaction
+    const runtime_transaction = switch (try verify_transaction.verifyTransaction(
         allocator,
         transaction,
         &feature_set,
         &accounts_db,
-    );
-
-    const runtime_transaction: RuntimeTransaction = switch (verify_transaction_result) {
+    )) {
         .ok => |txn| txn,
         .err => |err| return err,
     };
-
-    std.debug.print("Verified transaction!!!!\n", .{});
 
     _ = runtime_transaction;
     _ = emit_logs;
@@ -963,7 +965,6 @@ const State = struct {
     ancestors: Ancestors,
     rent: Rent,
     epoch_schedule: EpochSchedule,
-    sysvar_cache: SysvarCache,
     accounts_db: *AccountsDb,
 };
 
