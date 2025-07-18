@@ -718,7 +718,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .epoch_schedule = epoch_schedule,
         .accounts_db = &accounts_db,
     });
-    if (true) return .{};
 
     // Initialize and populate the sysvar cache
     var sysvar_cache = SysvarCache{};
@@ -749,12 +748,12 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer accounts.deinit(allocator);
 
-    // TODO: use correct rent collector
+    // Add this to state validation
     const rent_collector = RentCollector{
         .epoch = epoch,
         .epoch_schedule = epoch_schedule,
         .rent = genesis_config.rent,
-        .slots_per_year = 0,
+        .slots_per_year = genesis_config.slotsPerYear(),
     };
 
     // Create Transaction Execution Environment
@@ -770,7 +769,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .next_vm_environment = null,
 
         .slot = slot,
-        .max_age = 0,
+        .max_age = 150,
         .last_blockhash = blockhash_queue.last_hash.?,
         .next_durable_nonce = sig.runtime.nonce.initDurableNonceFromHash(blockhash_queue.last_hash.?),
         .next_lamports_per_signature = lamports_per_signature,
