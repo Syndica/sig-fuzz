@@ -415,9 +415,11 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     // TODO: use `hashSlot` to compute the slot hash
     // bank.rehash();
+    // const slot_hash = Hash.ZEROES;
+    const slot_hash = Hash.parseBase58String("6AavNxZpjzFwkHto1bfh5WcS4xLiUKecVoVCcskVY6H") catch unreachable;
 
     parent_slot = slot;
-    parent_hash = Hash.ZEROES; // TODO: use computed slot hash
+    parent_hash = slot_hash;
     const parent_epoch = epoch;
 
     slot = loadSlot(&pb_txn_ctx);
@@ -487,19 +489,86 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
             // Update epoch
             if (parent_epoch < epoch) {
-                try bank_methods.processNewEpoch(
+                // Bank::process_new_epoch(...)
+
+                try bank_methods.applyFeatureActivations(
                     allocator,
-                    epoch,
                     slot,
-                    parent_epoch,
-                    parent_slot,
                     &feature_set,
                     &accounts_db,
+                    true,
                 );
+
+                // stakes_cache.activateEpoch();
+                // Since the stakes cache is empty, we don't need to actually do anything here except add
+                // an entry for the parent epoch with zero stakes.
+                // https://github.com/firedancer-io/agave/blob/10fe1eb29aac9c236fd72d08ae60a3ef61ee8353/runtime/src/stakes.rs#L297
+                {
+                    const stakes: *StakesCache.T(), var stakes_guard = stakes_cache.stakes.writeWithLock();
+                    defer stakes_guard.unlock();
+                    stakes.epoch = epoch;
+                    std.debug.assert(stakes.stake_history.entries.len == 0);
+                    stakes.stake_history.entries.appendAssumeCapacity(.{ .epoch = parent_epoch, .stake = .{
+                        .effective = 0,
+                        .activating = 0,
+                        .deactivating = 0,
+                    } });
+                }
+
+                const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(slot);
+                // Since stakes cache is empty, we just need to insert an empty stakes entry
+                // into the epoch stakes map at the leader schedule epoch stakes map if it is not
+                // present
+                // updateEpochStakes(leader_schedule_epoch);
+                if (!epoch_stakes_map.contains(leader_schedule_epoch))
+                    try epoch_stakes_map.put(
+                        allocator,
+                        leader_schedule_epoch,
+                        try .init(allocator),
+                    );
+
+                // TODO: implement
+                // let CalculateRewardsAndDistributeVoteRewardsResult {
+                //     distributed_rewards,
+                //     point_value,
+                //     stake_rewards_by_partition,
+                // } = self.calculate_rewards_and_distribute_vote_rewards(
+                //     parent_epoch,
+                //     reward_calc_tracer,
+                //     thread_pool,
+                //     rewards_metrics,
+                // );
+                // let slot = self.slot();
+                // let distribution_starting_block_height =
+                //     self.block_height() + REWARD_CALCULATION_NUM_BLOCKS;
+                // self.set_epoch_reward_status_active(
+                //     distribution_starting_block_height,
+                //     stake_rewards_by_partition,
+                // );
+
+                // self.create_epoch_rewards_sysvar(
+                //     distributed_rewards,
+                //     distribution_starting_block_height,
+                //     num_partitions,
+                //     point_value,
+                // );
+
+                // let num_partitions = stake_rewards_by_partition.len() as u64;
             } else {
-                const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(epoch);
-                try bank_methods.updateEpochStakes(leader_schedule_epoch);
+                const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(slot);
+                // Since stakes cache is empty, we just need to insert an empty stakes entry
+                // into the epoch stakes map at the leader schedule epoch stakes map if it is not
+                // present
+                // updateEpochStakes(leader_schedule_epoch);
+                if (!epoch_stakes_map.contains(leader_schedule_epoch))
+                    try epoch_stakes_map.put(
+                        allocator,
+                        leader_schedule_epoch,
+                        try .init(allocator),
+                    );
             }
+
+            // TODO: implement
             try bank_methods.distributePartitionedEpochRewards();
 
             // Prepare program cache for upcoming feature set

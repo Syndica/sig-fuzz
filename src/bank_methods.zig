@@ -58,36 +58,8 @@ const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
 
 const failing_allocator = sig.utils.allocators.failing.allocator(.{});
 
-/// A minimal implementation of `Bank::process_new_epoch` for fuzzing purposes.
-/// If a fixture hits an error, we may need to implement the missing logic.
-pub fn processNewEpoch(
-    allocator: Allocator,
-    epoch: Epoch,
-    slot: Slot,
-    parent_epoch: Epoch,
-    parent_slot: Slot,
-    feature_set: *FeatureSet,
-    accounts_db: *AccountsDb,
-) !void {
-    try applyFeatureActivations(allocator, slot, feature_set, accounts_db, true);
-    _ = epoch;
-    _ = parent_epoch;
-    _ = parent_slot;
-
-    // TODO: implement stakes_cache activate epoch
-    // stakes_cache.activateEpoch();
-
-    // const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(slot);
-    // TODO: implement update epoch stakes
-    // updateEpochStakes(leader_schedule_epoch);
-
-    // TODO: implement begin partitioned rewards
-    // beginPartitionedRewards();
-}
-
-pub fn updateEpochStakes(leader_schedule_epoch: Epoch) !void {
+pub fn beginPartitionedRewards() void {
     // TODO
-    _ = leader_schedule_epoch;
 }
 
 pub fn distributePartitionedEpochRewards() !void {
