@@ -417,10 +417,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     // let mut bank = bank_forks.read().unwrap().root_bank();
     //     Just gets the root bank
 
-    // TODO: use `hashSlot` to compute the slot hash
+    // TODO: use `hashSlot` to compute the slot hash after merging dnut/replay/freeze into harnew/txn-fuzzing-dbg
     // bank.rehash();
-    // const slot_hash = Hash.ZEROES;
-    const slot_hash = Hash.parseBase58String("6AavNxZpjzFwkHto1bfh5WcS4xLiUKecVoVCcskVY6H") catch unreachable;
+    const slot_hash = Hash.ZEROES;
+    // const slot_hash = Hash.parseBase58String("6AavNxZpjzFwkHto1bfh5WcS4xLiUKecVoVCcskVY6H") catch unreachable;
 
     parent_slot = slot;
     parent_hash = slot_hash;
@@ -707,6 +707,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     try update_sysvar.updateRecentBlockhashes(allocator, &blockhash_queue, update_sysvar_deps);
 
     // Checkpoint 3
+    // NOTE: For basic fixtures, we produce equivalent state up until this point, excluding the
+    // bank hash which requires changes from dnut/replay/freeze. Once incorporated we should
+    // attempt validation of all public fixtures (or at least a reasonable number) before
+    // moving onto transaction debugging.
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -739,7 +743,13 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .err => |err| return err,
     };
 
+    // Return after verification, batch account loader not working as expected with zero lamport
+    // accounts. We should consider merging changes from dnut/replay/commit for transaction
+    // execution and dependency management.
+    if (true) return .{};
+
     // Create batch account cache from accounts db
+    // Currently broken on harnew/txn-fuzzing-dbg -- zero lamport accounts handled incorrectly
     var accounts = try BatchAccountCache.initFromAccountsDb(
         .AccountsDb,
         allocator,
@@ -748,7 +758,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     );
     defer accounts.deinit(allocator);
 
-    // Add this to state validation
     const rent_collector = RentCollector{
         .epoch = epoch,
         .epoch_schedule = epoch_schedule,
@@ -756,7 +765,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .slots_per_year = genesis_config.slotsPerYear(),
     };
 
-    // Create Transaction Execution Environment
     const environment = TransactionExecutionEnvironment{
         .ancestors = &ancestors,
         .feature_set = &feature_set,
@@ -777,7 +785,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .lamports_per_signature = lamports_per_signature,
     };
 
-    // Create Transaction Execution Config
     const config = sig.runtime.transaction_execution.TransactionExecutionConfig{
         .log = emit_logs,
         .log_messages_byte_limit = null,
