@@ -58,14 +58,6 @@ const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
 
 const failing_allocator = sig.utils.allocators.failing.allocator(.{});
 
-pub fn beginPartitionedRewards() void {
-    // TODO
-}
-
-pub fn distributePartitionedEpochRewards() !void {
-    // TODO
-}
-
 /// A minimal implementation of `Bank::apply_feature_activations` for fuzzing purposes.
 /// If a fixture hits an error, we may need to implement the missing feature activation logic.
 /// https://github.com/firedancer-io/agave/blob/10fe1eb29aac9c236fd72d08ae60a3ef61ee8353/runtime/src/bank.rs#L6453

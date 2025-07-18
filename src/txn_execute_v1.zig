@@ -89,8 +89,10 @@ const TransactionInstruction = sig.core.transaction.Instruction;
 const TransactionAddressLookup = sig.core.transaction.AddressLookup;
 
 const AccountSharedData = sig.runtime.AccountSharedData;
+const BatchAccountCache = sig.runtime.account_loader.BatchAccountCache;
 const Clock = sig.runtime.sysvar.Clock;
 const ComputeBudget = sig.runtime.ComputeBudget;
+const EpochRewards = sig.runtime.sysvar.EpochRewards;
 const EpochSchedule = sig.runtime.sysvar.EpochSchedule;
 const FeatureSet = sig.runtime.features.FeatureSet;
 const LastRestartSlot = sig.runtime.sysvar.LastRestartSlot;
@@ -100,7 +102,9 @@ const SlotHashes = sig.runtime.sysvar.SlotHashes;
 const StakeHistory = sig.runtime.sysvar.StakeHistory;
 const SysvarCache = sig.runtime.SysvarCache;
 const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
+const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
 
+const loadAndExecuteTransactions = sig.runtime.transaction_execution.loadAndExecuteTransactions;
 const loadTestAccountsDB = sig.accounts_db.db.loadTestAccountsDbEmpty;
 const fillMissingSysvarCacheEntries = sig.replay.update_sysvar.fillMissingSysvarCacheEntries;
 const deinitMapAndValues = sig.utils.collections.deinitMapAndValues;
@@ -517,8 +521,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
                 const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(slot);
                 // Since stakes cache is empty, we just need to insert an empty stakes entry
-                // into the epoch stakes map at the leader schedule epoch stakes map if it is not
-                // present
+                // into the epoch stakes map at the leader schedule epoch stakes map if it is not present
                 // updateEpochStakes(leader_schedule_epoch);
                 if (!epoch_stakes_map.contains(leader_schedule_epoch))
                     try epoch_stakes_map.put(
@@ -527,38 +530,30 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                         try .init(allocator),
                     );
 
-                // TODO: implement
-                // let CalculateRewardsAndDistributeVoteRewardsResult {
-                //     distributed_rewards,
-                //     point_value,
-                //     stake_rewards_by_partition,
-                // } = self.calculate_rewards_and_distribute_vote_rewards(
-                //     parent_epoch,
-                //     reward_calc_tracer,
-                //     thread_pool,
-                //     rewards_metrics,
-                // );
-                // let slot = self.slot();
-                // let distribution_starting_block_height =
-                //     self.block_height() + REWARD_CALCULATION_NUM_BLOCKS;
-                // self.set_epoch_reward_status_active(
-                //     distribution_starting_block_height,
-                //     stake_rewards_by_partition,
-                // );
-
-                // self.create_epoch_rewards_sysvar(
-                //     distributed_rewards,
-                //     distribution_starting_block_height,
-                //     num_partitions,
-                //     point_value,
-                // );
-
-                // let num_partitions = stake_rewards_by_partition.len() as u64;
+                // Bank::begin_partitioned_epoch_rewards(...)
+                // Similar to the above, epoch rewards is set but nothing meaningful is computed
+                // since there are no staked nodes or rewards to distribute.
+                // See: EpochRewards Debug Log: 0a73c09ab08f77e00b0faa8cf0d70408113b0a92_265678.fix
+                const epoch_rewards = EpochRewards{
+                    .distribution_starting_block_height = 2,
+                    .num_partitions = 1,
+                    .parent_blockhash = blockhash_queue.last_hash.?,
+                    .total_points = 0,
+                    .total_rewards = 0,
+                    .distributed_rewards = 0,
+                    .active = true,
+                };
+                try update_sysvar.updateSysvarAccount(allocator, EpochRewards, epoch_rewards, .{
+                    .accounts_db = &accounts_db,
+                    .ancestors = &ancestors,
+                    .capitalization = &capitalization,
+                    .rent = &genesis_config.rent,
+                    .slot = slot,
+                });
             } else {
                 const leader_schedule_epoch = epoch_schedule.getLeaderScheduleEpoch(slot);
                 // Since stakes cache is empty, we just need to insert an empty stakes entry
-                // into the epoch stakes map at the leader schedule epoch stakes map if it is not
-                // present
+                // into the epoch stakes map at the leader schedule epoch stakes map if it is not present
                 // updateEpochStakes(leader_schedule_epoch);
                 if (!epoch_stakes_map.contains(leader_schedule_epoch))
                     try epoch_stakes_map.put(
@@ -568,8 +563,10 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                     );
             }
 
-            // TODO: implement
-            try bank_methods.distributePartitionedEpochRewards();
+            // Bank::distribute_partitioned_epoch_rewards(...)
+            // Effectively noop for txn fuzzing purposes since height < distribution_starting_block_height
+            // See: EpochRewards Debug Log: 0a73c09ab08f77e00b0faa8cf0d70408113b0a92_265678.fix
+            // try bank_methods.distributePartitionedEpochRewards();
 
             // Prepare program cache for upcoming feature set
 
@@ -721,6 +718,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .epoch_schedule = epoch_schedule,
         .accounts_db = &accounts_db,
     });
+    if (true) return .{};
 
     // Initialize and populate the sysvar cache
     var sysvar_cache = SysvarCache{};
@@ -742,8 +740,59 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .err => |err| return err,
     };
 
-    _ = runtime_transaction;
-    _ = emit_logs;
+    // Create batch account cache from accounts db
+    var accounts = try BatchAccountCache.initFromAccountsDb(
+        .AccountsDb,
+        allocator,
+        &accounts_db,
+        &.{runtime_transaction},
+    );
+    defer accounts.deinit(allocator);
+
+    // TODO: use correct rent collector
+    const rent_collector = RentCollector{
+        .epoch = epoch,
+        .epoch_schedule = epoch_schedule,
+        .rent = genesis_config.rent,
+        .slots_per_year = 0,
+    };
+
+    // Create Transaction Execution Environment
+    const environment = TransactionExecutionEnvironment{
+        .ancestors = &ancestors,
+        .feature_set = &feature_set,
+        .status_cache = &StatusCache.default(),
+        .sysvar_cache = &sysvar_cache,
+        .rent_collector = &rent_collector,
+        .blockhash_queue = &blockhash_queue,
+        .epoch_stakes = &epoch_stakes_map.get(epoch).?,
+        .vm_environment = &vm_environment,
+        .next_vm_environment = null,
+
+        .slot = slot,
+        .max_age = 0,
+        .last_blockhash = blockhash_queue.last_hash.?,
+        .next_durable_nonce = sig.runtime.nonce.initDurableNonceFromHash(blockhash_queue.last_hash.?),
+        .next_lamports_per_signature = lamports_per_signature,
+        .last_lamports_per_signature = lamports_per_signature,
+        .lamports_per_signature = lamports_per_signature,
+    };
+
+    // Create Transaction Execution Config
+    const config = sig.runtime.transaction_execution.TransactionExecutionConfig{
+        .log = emit_logs,
+        .log_messages_byte_limit = null,
+    };
+
+    const txn_results = try loadAndExecuteTransactions(
+        allocator,
+        &.{runtime_transaction},
+        &accounts,
+        &environment,
+        &config,
+    );
+
+    _ = txn_results;
 
     return .{};
 }
@@ -1492,3 +1541,35 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
         .tx = pb_tx,
     };
 }
+
+// EpochRewards Debug Log: 0a73c09ab08f77e00b0faa8cf0d70408113b0a92_265678.fix
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/calculation.rs:60:9] &distributed_rewards = 0
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/calculation.rs:61:9] &point_value = PointValue {
+//     rewards: 0,
+//     points: 0,
+// }
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/calculation.rs:62:9] &stake_rewards_by_partition = [
+//     [],
+// ]
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/calculation.rs:68:9] self.block_height() = 1
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/calculation.rs:69:9] distribution_starting_block_height = 2
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/sysvar.rs:47:9] &epoch_rewards = EpochRewards {
+//     distribution_starting_block_height: 2,
+//     num_partitions: 1,
+//     parent_blockhash: Brqgfg9qhuU6BN29JvA1U2yUwd89evLxkGrPhgQ9T7GK,
+//     total_points: 0,
+//     total_rewards: 0,
+//     distributed_rewards: 0,
+//     active: true,
+// }
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:43:9] &self.epoch_reward_status = Active(
+//     StartBlockHeightAndRewards {
+//         distribution_starting_block_height: 2,
+//         stake_rewards_by_partition: [
+//             [],
+//         ],
+//     },
+// )
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] height = 1
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] distribution_starting_block_height = 2
+// [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] distribution_end_exclusive = 3
