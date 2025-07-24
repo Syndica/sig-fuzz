@@ -110,13 +110,16 @@ pub fn verifyTransaction(
 
     const resolved_txn = resolved_batch.transactions[0];
 
+    const instrs = try allocator.dupe(sig.runtime.InstructionInfo, resolved_txn.instructions);
+    for (instrs) |*instr| instr.instruction_data = try allocator.dupe(u8, instr.instruction_data);
+
     return .{ .ok = .{
         .signature_count = resolved_txn.transaction.signatures.len,
         .fee_payer = resolved_txn.transaction.msg.account_keys[0],
         .msg_hash = msg_hash,
         .recent_blockhash = resolved_txn.transaction.msg.recent_blockhash,
-        .instruction_infos = resolved_txn.instructions,
-        .accounts = resolved_txn.accounts,
+        .instruction_infos = instrs,
+        .accounts = try resolved_txn.accounts.clone(allocator),
     } };
 }
 

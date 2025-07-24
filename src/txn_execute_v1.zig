@@ -279,13 +279,13 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
                 false,
             );
 
-            // TODO: This gets hit
+            // NOTE: This gets hit
             // Set limits for 50m block limits
             // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_50M)) {
             //     @panic("set limits not implemented");
             // }
 
-            // TODO: This gets hit
+            // NOTE: This gets hit
             // Set limits for 60m block limits
             // if (feature_set.active.contains(features.RAISE_BLOCK_LIMITS_TO_60M)) {
             //     @panic("set limits not implemented");
@@ -397,7 +397,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         // populate immediately before executing transactions. (I think....)
     }
 
-    // Checkpoint 1
+    // Checkpoint 1 -- End of Genesis Bank Initialization
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -419,8 +419,8 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     // TODO: use `hashSlot` to compute the slot hash after merging dnut/replay/freeze into harnew/txn-fuzzing-dbg
     // bank.rehash();
-    const slot_hash = Hash.ZEROES;
-    // const slot_hash = Hash.parseBase58String("6AavNxZpjzFwkHto1bfh5WcS4xLiUKecVoVCcskVY6H") catch unreachable;
+    // const slot_hash = Hash.ZEROES;
+    const slot_hash = Hash.parseBase58String("6AavNxZpjzFwkHto1bfh5WcS4xLiUKecVoVCcskVY6H") catch unreachable;
 
     parent_slot = slot;
     parent_hash = slot_hash;
@@ -627,7 +627,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         {}
     }
 
-    // Checkpoint 2
+    // Checkpoint 2 -- End of Bank Transition to TxnContext Slot
     try writeState(allocator, .{
         .slot = slot,
         .epoch = epoch,
@@ -684,6 +684,8 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         const recent_blockhashes = sysvar_cache.get(RecentBlockhashes) catch
             break :blk null;
 
+        std.debug.print("recent_blockhashes: {any}\n", .{recent_blockhashes.entries.constSlice()});
+
         const first_entry = recent_blockhashes.getFirst() orelse
             break :blk null;
 
@@ -692,6 +694,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         else
             null;
     } orelse fee_rate_govenor.lamports_per_signature;
+    std.debug.print("lamports_per_signature: {d}\n", .{lamports_per_signature});
 
     // Register blockhashes and update recent blockhashes sysvar
     for (blockhashes) |blockhash| {
@@ -742,11 +745,17 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .ok => |txn| txn,
         .err => |err| return err,
     };
+    defer {
+        for (runtime_transaction.instruction_infos) |info| info.deinit(allocator);
+        allocator.free(runtime_transaction.instruction_infos);
+        var accs = runtime_transaction.accounts;
+        accs.deinit(allocator);
+    }
 
     // Return after verification, batch account loader not working as expected with zero lamport
     // accounts. We should consider merging changes from dnut/replay/commit for transaction
     // execution and dependency management.
-    if (true) return .{};
+    // if (true) return .{};
 
     // Create batch account cache from accounts db
     // Currently broken on harnew/txn-fuzzing-dbg -- zero lamport accounts handled incorrectly
@@ -765,6 +774,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .slots_per_year = genesis_config.slotsPerYear(),
     };
 
+    const current_epoch_stakes = try EpochStakes.init(allocator);
+    defer current_epoch_stakes.deinit(allocator);
+
     const environment = TransactionExecutionEnvironment{
         .ancestors = &ancestors,
         .feature_set = &feature_set,
@@ -772,7 +784,7 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .sysvar_cache = &sysvar_cache,
         .rent_collector = &rent_collector,
         .blockhash_queue = &blockhash_queue,
-        .epoch_stakes = &epoch_stakes_map.get(epoch).?,
+        .epoch_stakes = &current_epoch_stakes,
         .vm_environment = &vm_environment,
         .next_vm_environment = null,
 
@@ -797,8 +809,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         &environment,
         &config,
     );
+    defer allocator.free(txn_results);
 
-    _ = txn_results;
+    std.debug.print("txn_results: {any}\n", .{txn_results});
 
     return .{};
 }
