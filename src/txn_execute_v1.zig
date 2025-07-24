@@ -777,6 +777,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     const current_epoch_stakes = try EpochStakes.init(allocator);
     defer current_epoch_stakes.deinit(allocator);
 
+    const acc = accounts.account_cache.get(Pubkey.parseBase58String("6CdPUpVZW1aXCK9gfNSjxnrySvH5mGgDdiuerUYeSRxq") catch unreachable).?;
+    std.debug.print("acc.data: {any}\n", .{acc.data});
+
     const environment = TransactionExecutionEnvironment{
         .ancestors = &ancestors,
         .feature_set = &feature_set,
@@ -792,9 +795,9 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         .max_age = 150,
         .last_blockhash = blockhash_queue.last_hash.?,
         .next_durable_nonce = sig.runtime.nonce.initDurableNonceFromHash(blockhash_queue.last_hash.?),
-        .next_lamports_per_signature = lamports_per_signature,
-        .last_lamports_per_signature = lamports_per_signature,
-        .lamports_per_signature = lamports_per_signature,
+        .next_lamports_per_signature = 5000,
+        .last_lamports_per_signature = 5000,
+        .lamports_per_signature = 5000,
     };
 
     const config = sig.runtime.transaction_execution.TransactionExecutionConfig{
@@ -809,9 +812,16 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
         &environment,
         &config,
     );
-    defer allocator.free(txn_results);
 
-    std.debug.print("txn_results: {any}\n", .{txn_results});
+    defer {
+        switch (txn_results[0]) {
+            .ok => |r| r.deinit(allocator),
+            .err => |e| std.debug.print("Transaction execution error: {any}\n", .{e}),
+        }
+        allocator.free(txn_results);
+    }
+
+    std.debug.print("txn_results: {any}\n", .{txn_results[0].ok.executed});
 
     return .{};
 }
@@ -1592,3 +1602,6 @@ fn sampleTxnContext(allocator: std.mem.Allocator) !pb.TxnContext {
 // [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] height = 1
 // [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] distribution_starting_block_height = 2
 // [/home/ubuntu/jump/agave/runtime/src/bank/partitioned_epoch_rewards/distribution.rs:57:9] distribution_end_exclusive = 3
+
+// [ 1, 0, 0, 0, 1, 0, 0, 0, 125, 67, 221, 3, 128, 80, 136, 101, 229, 47, 139, 240, 175, 86, 36, 122, 119, 139, 50, 32, 105, 222, 10, 14, 185, 55, 222, 237, 15, 97, 223, 57, 1, 38, 95, 238, 182, 36, 65, 96, 132, 232, 80, 181, 76, 191, 123, 13, 128, 239, 136, 1, 244, 161, 58, 100, 178, 155, 207, 80, 187, 65, 68, 62, 189, 178, 67, 182, 236, 17, 33, 109 ]
+// [ 1, 0, 0, 0, 1, 0, 0, 0, 125, 67, 221, 3, 128, 80, 136, 101, 229, 47, 139, 240, 175, 86, 36, 122, 119, 139, 50, 32, 105, 222, 10, 14, 185, 55, 222, 237, 15, 97, 223, 57, 129, 214, 61, 31, 179, 208, 218, 154, 77, 207, 109, 78, 94, 55, 210, 239, 219, 49, 49, 142, 241, 230, 44, 155, 83, 177, 21, 15, 38, 163, 10, 243, 136, 19, 0, 0, 0, 0, 0, 0 ]
