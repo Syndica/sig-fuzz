@@ -3,7 +3,7 @@ const sig = @import("sig");
 const std = @import("std");
 
 const sysvar = sig.runtime.sysvar;
-const features = sig.runtime.features;
+const features = sig.core.features;
 
 const Hash = sig.core.Hash;
 const Signature = sig.core.Signature;
@@ -36,7 +36,7 @@ const VerifyTransactionResult = union(enum(u8)) {
     err: pb.TxnResult,
 };
 
-const FeatureSet = sig.runtime.FeatureSet;
+const FeatureSet = sig.core.features.FeatureSet;
 const AccountsDb = sig.accounts_db.AccountsDB;
 
 pub fn verifyTransaction(

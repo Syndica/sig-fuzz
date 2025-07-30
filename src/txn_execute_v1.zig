@@ -3,6 +3,7 @@ const sig = @import("sig");
 const std = @import("std");
 
 const EMIT_LOGS = false;
+const STACK_SIZE = 32 * 1024 * 1024;
 
 /// [fd] https://github.com/firedancer-io/firedancer/blob/61e3d2e21419fc71002aa1c037ab637cea85416d/src/flamenco/runtime/tests/harness/fd_exec_sol_compat.c#L583
 /// [solfuzz-agave] https://github.com/firedancer-io/solfuzz-agave/blob/7d039a85e55227fdd7ae5c9d0e1c36c7cf5b01f5/src/txn_fuzzer.rs#L46
@@ -27,6 +28,13 @@ export fn sol_compat_txn_execute_v1(
         return 0;
     };
     defer pb_txn_ctx.deinit();
+
+    // increase the stack limit
+    var rl = try std.posix.getrlimit(.STACK);
+    if (rl.cur < STACK_SIZE) {
+        rl.cur = STACK_SIZE;
+        try std.posix.setrlimit(.STACK, rl);
+    }
 
     const result = executeTxnContext(allocator, pb_txn_ctx, EMIT_LOGS) catch |err| {
         std.debug.print("executeTxnContext: {s}\n", .{@errorName(err)});
@@ -58,7 +66,7 @@ const Allocator = std.mem.Allocator;
 const Atomic = std.atomic.Value;
 
 const bincode = sig.bincode;
-const features = sig.runtime.features;
+const features = sig.core.features;
 const program = sig.runtime.program;
 const sysvars = sig.runtime.sysvar;
 const vm = sig.vm;
@@ -72,7 +80,7 @@ const BlockhashQueue = sig.core.BlockhashQueue;
 const Epoch = sig.core.Epoch;
 const EpochStakes = sig.core.EpochStakes;
 const EpochStakesMap = sig.core.EpochStakesMap;
-const FeeRateGovernor = sig.core.FeeRateGovernor;
+const FeeRateGovernor = sig.core.genesis_config.FeeRateGovernor;
 const GenesisConfig = sig.core.GenesisConfig;
 const Hash = sig.core.Hash;
 const HardForks = sig.core.HardForks;
@@ -94,7 +102,7 @@ const Clock = sig.runtime.sysvar.Clock;
 const ComputeBudget = sig.runtime.ComputeBudget;
 const EpochRewards = sig.runtime.sysvar.EpochRewards;
 const EpochSchedule = sig.runtime.sysvar.EpochSchedule;
-const FeatureSet = sig.runtime.features.FeatureSet;
+const FeatureSet = sig.core.features.FeatureSet;
 const LastRestartSlot = sig.runtime.sysvar.LastRestartSlot;
 const RecentBlockhashes = sig.runtime.sysvar.RecentBlockhashes;
 const Rent = sig.runtime.sysvar.Rent;
@@ -103,6 +111,7 @@ const StakeHistory = sig.runtime.sysvar.StakeHistory;
 const SysvarCache = sig.runtime.SysvarCache;
 const RuntimeTransaction = sig.runtime.transaction_execution.RuntimeTransaction;
 const TransactionExecutionEnvironment = sig.runtime.transaction_execution.TransactionExecutionEnvironment;
+const TransactionResult = sig.runtime.transaction_execution.TransactionResult(sig.runtime.transaction_execution.ProcessedTransaction);
 
 const loadAndExecuteTransactions = sig.runtime.transaction_execution.loadAndExecuteTransactions;
 const loadTestAccountsDB = sig.accounts_db.db.loadTestAccountsDbEmpty;
@@ -334,8 +343,6 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
             // Add precompiles
             for (program.precompiles.PRECOMPILES) |precompile| {
                 if (precompile.required_feature != null) continue;
-                // const data = try allocator.dupe(u8, &.{});
-                // defer allocator.free(data);
                 try accounts_db.putAccount(slot, precompile.program_id, .{
                     .lamports = 1,
                     .data = &.{},
@@ -398,17 +405,17 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     }
 
     // Checkpoint 1 -- End of Genesis Bank Initialization
-    try writeState(allocator, .{
-        .slot = slot,
-        .epoch = epoch,
-        .hash = Hash.ZEROES,
-        .parent_slot = parent_slot,
-        .parent_hash = parent_hash,
-        .ancestors = ancestors,
-        .rent = genesis_config.rent,
-        .epoch_schedule = epoch_schedule,
-        .accounts_db = &accounts_db,
-    });
+    // try writeState(allocator, .{
+    //     .slot = slot,
+    //     .epoch = epoch,
+    //     .hash = Hash.ZEROES,
+    //     .parent_slot = parent_slot,
+    //     .parent_hash = parent_hash,
+    //     .ancestors = ancestors,
+    //     .rent = genesis_config.rent,
+    //     .epoch_schedule = epoch_schedule,
+    //     .accounts_db = &accounts_db,
+    // });
 
     // NOTE: The following logic should not impact txn fuzzing
     // let bank_forks = BankForks::new_rw_arc(bank);
@@ -628,17 +635,17 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     }
 
     // Checkpoint 2 -- End of Bank Transition to TxnContext Slot
-    try writeState(allocator, .{
-        .slot = slot,
-        .epoch = epoch,
-        .hash = Hash.ZEROES,
-        .parent_slot = parent_slot,
-        .parent_hash = parent_hash,
-        .ancestors = ancestors,
-        .rent = genesis_config.rent,
-        .epoch_schedule = epoch_schedule,
-        .accounts_db = &accounts_db,
-    });
+    // try writeState(allocator, .{
+    //     .slot = slot,
+    //     .epoch = epoch,
+    //     .hash = Hash.ZEROES,
+    //     .parent_slot = parent_slot,
+    //     .parent_hash = parent_hash,
+    //     .ancestors = ancestors,
+    //     .rent = genesis_config.rent,
+    //     .epoch_schedule = epoch_schedule,
+    //     .accounts_db = &accounts_db,
+    // });
 
     // Remove address lookup table and config program accounts by inserting empty accounts (zero-lamports)
     try accounts_db.putAccount(slot, program.address_lookup_table.ID, AccountSharedData.EMPTY);
@@ -714,17 +721,17 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
     // bank hash which requires changes from dnut/replay/freeze. Once incorporated we should
     // attempt validation of all public fixtures (or at least a reasonable number) before
     // moving onto transaction debugging.
-    try writeState(allocator, .{
-        .slot = slot,
-        .epoch = epoch,
-        .hash = Hash.ZEROES,
-        .parent_slot = parent_slot,
-        .parent_hash = parent_hash,
-        .ancestors = ancestors,
-        .rent = genesis_config.rent,
-        .epoch_schedule = epoch_schedule,
-        .accounts_db = &accounts_db,
-    });
+    // try writeState(allocator, .{
+    //     .slot = slot,
+    //     .epoch = epoch,
+    //     .hash = Hash.ZEROES,
+    //     .parent_slot = parent_slot,
+    //     .parent_hash = parent_hash,
+    //     .ancestors = ancestors,
+    //     .rent = genesis_config.rent,
+    //     .epoch_schedule = epoch_schedule,
+    //     .accounts_db = &accounts_db,
+    // });
 
     // Initialize and populate the sysvar cache
     var sysvar_cache = SysvarCache{};
@@ -823,7 +830,52 @@ fn executeTxnContext(allocator: std.mem.Allocator, pb_txn_ctx: pb.TxnContext, em
 
     std.debug.print("txn_results: {any}\n", .{txn_results[0].ok.executed});
 
-    return .{};
+    return try serializeOutput(allocator, txn_results[0]);
+}
+
+fn serializeOutput(allocator: std.mem.Allocator, result: TransactionResult) !pb.TxnResult {
+    switch (result) {
+        .ok => |txn| {
+            if (txn == .fees_only) @panic("TODO");
+            const executed_txn = txn.executed;
+
+            return .{
+                .executed = true,
+                .sanitization_error = false,
+                .is_ok = executed_txn.executed_transaction.err == null,
+                .resulting_state = .{
+                    .acct_states = a: {
+                        var acc_states: std.ArrayList(pb.AcctState) = .init(allocator);
+                        errdefer acc_states.deinit();
+
+                        for (executed_txn.loaded_accounts.accounts.constSlice()) |acc| {
+                            try acc_states.append(.{
+                                .address = try .copy(&acc.pubkey.data, allocator),
+                                .lamports = acc.account.lamports,
+                                .data = try .copy(acc.account.data, allocator),
+                                .executable = acc.account.executable,
+                                .rent_epoch = acc.account.rent_epoch,
+                                .owner = try .copy(&acc.account.owner.data, allocator),
+                                .seed_addr = null,
+                            });
+                        }
+
+                        break :a acc_states;
+                    },
+                    .rent_debits = .init(allocator),
+                    .transaction_rent = executed_txn.loaded_accounts.rent_collected,
+                },
+                .fee_details = .{
+                    .transaction_fee = executed_txn.fees.transaction_fee,
+                    .prioritization_fee = executed_txn.fees.prioritization_fee,
+                },
+                // TODO: obviously hard coded number. compute_meter counts how many units left instead of how many units consumed
+                .executed_units = 200000 - executed_txn.executed_transaction.compute_meter,
+                .loaded_accounts_data_size = executed_txn.loaded_accounts.loaded_accounts_data_size,
+            };
+        },
+        .err => @panic("TODO"),
+    }
 }
 
 fn parseHash(bytes: []const u8) !Hash {

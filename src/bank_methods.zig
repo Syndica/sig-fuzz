@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const Atomic = std.atomic.Value;
 
 const bincode = sig.bincode;
-const features = sig.runtime.features;
+const features = sig.core.features;
 const program = sig.runtime.program;
 const sysvars = sig.runtime.sysvar;
 const vm = sig.vm;
@@ -43,7 +43,7 @@ const AccountSharedData = sig.runtime.AccountSharedData;
 const Clock = sig.runtime.sysvar.Clock;
 const ComputeBudget = sig.runtime.ComputeBudget;
 const EpochSchedule = sig.runtime.sysvar.EpochSchedule;
-const FeatureSet = sig.runtime.features.FeatureSet;
+const FeatureSet = sig.core.features.FeatureSet;
 const LastRestartSlot = sig.runtime.sysvar.LastRestartSlot;
 const RecentBlockhashes = sig.runtime.sysvar.RecentBlockhashes;
 const Rent = sig.runtime.sysvar.Rent;

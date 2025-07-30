@@ -5,7 +5,7 @@ const utils = @import("utils.zig");
 
 const ManagedString = @import("protobuf").ManagedString;
 
-const features = sig.runtime.features;
+const features = sig.core.features;
 const executor = sig.runtime.executor;
 const sysvar = sig.runtime.sysvar;
 const serialize = sig.runtime.program.bpf.serialize;
@@ -23,7 +23,7 @@ const InstructionError = sig.core.instruction.InstructionError;
 const InstructionInfo = sig.runtime.instruction_info.InstructionInfo;
 const TransactionContext = sig.runtime.transaction_context.TransactionContext;
 const TransactionContextAccount = sig.runtime.transaction_context.TransactionContextAccount;
-const FeatureSet = sig.runtime.FeatureSet;
+const FeatureSet = sig.core.FeatureSet;
 
 const Pubkey = sig.core.Pubkey;
 
